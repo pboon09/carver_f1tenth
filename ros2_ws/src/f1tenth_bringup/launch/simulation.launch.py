@@ -41,13 +41,14 @@ def launch_setup(context):
         parameters=[patched_config.name],
     )
 
+    bringup_dir = get_package_share_directory("f1tenth_bringup")
     rviz_node = Node(
         package="rviz2",
         executable="rviz2",
         name="rviz",
         arguments=[
             "-d",
-            os.path.join(gym_ros_dir, "launch", "gym_bridge.rviz"),
+            os.path.join(bringup_dir, "rviz", "stanley.rviz"),
         ],
     )
 

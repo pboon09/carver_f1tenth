@@ -2,7 +2,7 @@ import os
 
 from ament_index_python.packages import get_package_share_directory
 from launch import LaunchDescription
-from launch.actions import DeclareLaunchArgument, IncludeLaunchDescription
+from launch.actions import DeclareLaunchArgument, IncludeLaunchDescription, TimerAction
 from launch.launch_description_sources import PythonLaunchDescriptionSource
 from launch.substitutions import LaunchConfiguration
 
@@ -30,11 +30,16 @@ def generate_launch_description():
         launch_arguments={"map": LaunchConfiguration("map")}.items(),
     )
 
-    controller_launch = IncludeLaunchDescription(
-        PythonLaunchDescriptionSource(
-            os.path.join(launch_dir, "controller.launch.py")
-        ),
-        launch_arguments={"mode": LaunchConfiguration("mode")}.items(),
+    controller_launch = TimerAction(
+        period=2.0,
+        actions=[
+            IncludeLaunchDescription(
+                PythonLaunchDescriptionSource(
+                    os.path.join(launch_dir, "controller.launch.py")
+                ),
+                launch_arguments={"mode": LaunchConfiguration("mode")}.items(),
+            ),
+        ],
     )
 
     return LaunchDescription(
