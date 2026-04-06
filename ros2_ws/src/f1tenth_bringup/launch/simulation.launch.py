@@ -128,8 +128,8 @@ def generate_launch_description():
         [
             DeclareLaunchArgument(
                 "map",
-                default_value="levine",
-                description="Map name without extension (e.g. levine, levine_easy, levine_hard)",
+                default_value="Spielberg_map",
+                description="Map name without extension (e.g. Spielberg_map, Spielberg_map_easy)",
             ),
             OpaqueFunction(function=launch_setup),
         ]
