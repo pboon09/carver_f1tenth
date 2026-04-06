@@ -13,8 +13,14 @@ def generate_launch_description():
 
     map_arg = DeclareLaunchArgument(
         "map",
-        default_value="levine",
-        description="Map name without extension (e.g. levine, levine_easy, levine_hard)",
+        default_value="Spielberg_map",
+        description="Map name without extension (e.g. Spielberg_map, Spielberg_map_easy)",
+    )
+
+    mode_arg = DeclareLaunchArgument(
+        "mode",
+        default_value="manual",
+        description="Controller mode: manual or auto",
     )
 
     simulation_launch = IncludeLaunchDescription(
@@ -28,11 +34,13 @@ def generate_launch_description():
         PythonLaunchDescriptionSource(
             os.path.join(launch_dir, "controller.launch.py")
         ),
+        launch_arguments={"mode": LaunchConfiguration("mode")}.items(),
     )
 
     return LaunchDescription(
         [
             map_arg,
+            mode_arg,
             simulation_launch,
             controller_launch,
         ]

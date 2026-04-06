@@ -4,24 +4,19 @@
 
 ### Launch simulation
 
-Obstacle-free:
+Manual drive (default):
 ```bash
 ros2 launch f1tenth_bringup bringup.launch.py
 ```
 
-With obstacles:
+Auto drive:
 ```bash
-ros2 launch f1tenth_bringup bringup.launch.py map:=Spielberg_map_easy
+ros2 launch f1tenth_bringup bringup.launch.py mode:=auto
 ```
 
-With Stanley controller:
+With obstacle map:
 ```bash
-ros2 launch f1tenth_bringup bringup.launch.py mode:=stanley
-```
-
-Record path (drive with teleop, Ctrl+C to save):
-```bash
-ros2 run f1tenth_controller record_path.py
+ros2 launch f1tenth_bringup bringup.launch.py mode:=auto map:=Spielberg_map_easy
 ```
 
 ### Available maps
