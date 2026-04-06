@@ -11,19 +11,29 @@ ros2 launch f1tenth_bringup bringup.launch.py
 
 With obstacles:
 ```bash
-ros2 launch f1tenth_bringup bringup.launch.py map:=levine_easy
+ros2 launch f1tenth_bringup bringup.launch.py map:=Spielberg_map_easy
+```
+
+With Stanley controller:
+```bash
+ros2 launch f1tenth_bringup bringup.launch.py mode:=stanley
+```
+
+Record path (drive with teleop, Ctrl+C to save):
+```bash
+ros2 run f1tenth_controller record_path.py
 ```
 
 ### Available maps
 
 | Map | Obstacles | Description |
 |-----|-----------|-------------|
-| `levine` | 0 | Base track (default) |
-| `levine_easy` | 1 | Single obstacle |
-| `levine_medium` | 3 | Spread across corridors |
-| `levine_hard` | 5 | Both corridors + turns |
-| `levine_chicane` | 4 | Alternating left-right |
-| `levine_dense` | 10 | All four corridors |
+| `Spielberg_map` | 0 | Base track (default) |
+| `Spielberg_map_easy` | 2 | Two obstacles spread apart |
+| `Spielberg_map_medium` | 4 | Four corners of track |
+| `Spielberg_map_hard` | 8 | All sections covered |
+| `Spielberg_map_chicane` | 6 | Spread around full loop |
+| `Spielberg_map_dense` | 15 | Every section of track |
 
 ### Topics
 

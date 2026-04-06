@@ -5,39 +5,53 @@ from __future__ import annotations
 from generate_obstacle_map import Obstacle, ObstacleMapGenerator
 
 
+BASE_MAP = "Spielberg_map"
+
 VARIANTS = {
     "easy": [
-        Obstacle(4.0, 0.0, 0.2),
+        Obstacle(-31.7, 18.5, 0.25),
+        Obstacle(-58.7, 53.6, 0.25),
     ],
     "medium": [
-        Obstacle(-5.0, 0.0, 0.2),
-        Obstacle(5.0, 8.7, 0.25),
-        Obstacle(-13.7, 5.0, 0.2),
+        Obstacle(18.6, 24.5, 0.25),
+        Obstacle(-44.4, 22.6, 0.25),
+        Obstacle(-42.0, 50.5, 0.25),
+        Obstacle(-24.3, -6.5, 0.25),
     ],
     "hard": [
-        Obstacle(-3.0, 0.0, 0.25),
-        Obstacle(5.0, 0.0, 0.25),
-        Obstacle(-8.0, 8.7, 0.25),
-        Obstacle(3.0, 8.7, 0.25),
-        Obstacle(9.7, 4.0, 0.2),
+        Obstacle(8.1, 2.2, 0.25),
+        Obstacle(23.4, 8.8, 0.25),
+        Obstacle(-16.6, 25.0, 0.25),
+        Obstacle(-45.4, 37.3, 0.25),
+        Obstacle(-24.9, 48.3, 0.25),
+        Obstacle(-75.9, 52.5, 0.25),
+        Obstacle(-47.9, 10.1, 0.25),
+        Obstacle(-38.0, -3.8, 0.25),
     ],
     "chicane": [
-        Obstacle(-4.0, -0.3, 0.2),
-        Obstacle(-2.0, 0.3, 0.2),
-        Obstacle(4.0, -0.3, 0.2),
-        Obstacle(6.0, 0.3, 0.2),
+        Obstacle(8.1, 2.2, 0.25),
+        Obstacle(18.6, 24.5, 0.25),
+        Obstacle(-13.9, 42.6, 0.25),
+        Obstacle(-55.5, 25.0, 0.25),
+        Obstacle(-24.3, -6.5, 0.25),
+        Obstacle(-64.1, 39.5, 0.25),
     ],
     "dense": [
-        Obstacle(-10.0, 0.0, 0.3),
-        Obstacle(-5.0, 0.0, 0.2),
-        Obstacle(-3.0, 0.0, 0.25),
-        Obstacle(5.0, 0.0, 0.2),
-        Obstacle(-10.0, 8.7, 0.25),
-        Obstacle(-3.0, 8.7, 0.3),
-        Obstacle(4.0, 8.7, 0.2),
-        Obstacle(-13.7, 3.0, 0.2),
-        Obstacle(-13.7, 7.0, 0.2),
-        Obstacle(9.7, 4.0, 0.2),
+        Obstacle(8.1, 2.2, 0.25),
+        Obstacle(23.4, 8.8, 0.25),
+        Obstacle(18.6, 24.5, 0.25),
+        Obstacle(1.2, 25.3, 0.25),
+        Obstacle(-16.6, 25.0, 0.25),
+        Obstacle(-31.7, 18.5, 0.25),
+        Obstacle(-45.4, 37.3, 0.25),
+        Obstacle(-13.9, 42.6, 0.25),
+        Obstacle(-42.0, 50.5, 0.25),
+        Obstacle(-75.9, 52.5, 0.25),
+        Obstacle(-64.1, 39.5, 0.25),
+        Obstacle(-55.5, 25.0, 0.25),
+        Obstacle(-47.9, 10.1, 0.25),
+        Obstacle(-38.0, -3.8, 0.25),
+        Obstacle(-24.3, -6.5, 0.25),
     ],
 }
 
@@ -45,11 +59,11 @@ VARIANTS = {
 def main() -> None:
     for suffix, obstacles in VARIANTS.items():
         print(f"{'=' * 50}")
-        print(f"Generating: levine_{suffix} ({len(obstacles)} obstacles)")
+        print(f"Generating: {BASE_MAP}_{suffix} ({len(obstacles)} obstacles)")
         print(f"{'=' * 50}")
 
         generator = ObstacleMapGenerator(
-            base_map_name="levine",
+            base_map_name=BASE_MAP,
             output_suffix=suffix,
             obstacles=obstacles,
         )
