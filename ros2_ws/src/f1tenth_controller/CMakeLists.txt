@@ -29,6 +29,7 @@ ament_python_install_package(${PROJECT_NAME})
 install(PROGRAMS
   scripts/dummy_script.py
   scripts/stanley_avoidance.py
+  scripts/gap_follow.py
   DESTINATION lib/${PROJECT_NAME}
 )
 

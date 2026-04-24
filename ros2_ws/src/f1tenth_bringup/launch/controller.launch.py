@@ -11,6 +11,11 @@ def generate_launch_description():
         description="Controller mode: manual or auto"
     )
 
+    algorithm_arg = DeclareLaunchArgument(
+        "algorithm", default_value="stanley",
+        description="Control algorithm: stanley or gap_follow"
+    )
+
     teleop_node = Node(
         package="f1tenth_joy",
         executable="teleop.py",
@@ -50,7 +55,26 @@ def generate_launch_description():
             {"cells_per_meter": 20},
         ],
         condition=IfCondition(
-            PythonExpression(["'", LaunchConfiguration("mode"), "' == 'auto'"])
+            PythonExpression(["'", LaunchConfiguration("mode"), "' == 'auto' and '", LaunchConfiguration("algorithm"), "' == 'stanley'"])
+        ),
+    )
+
+    gap_follow_node = Node(
+        package="f1tenth_controller",
+        executable="gap_follow.py",
+        name="gap_follow_node",
+        output="screen",
+        parameters=[
+            {"min_speed": 0.5},
+            {"max_speed": 4.5},
+            {"max_steering_angle": 0.35},
+            {"steering_smoothing": 0.4},
+            {"car_width": 0.2},
+            {"min_distance_threshold": 2.5},
+            {"obstacle_inflated": 30},
+        ],
+        condition=IfCondition(
+            PythonExpression(["'", LaunchConfiguration("mode"), "' == 'auto' and '", LaunchConfiguration("algorithm"), "' == 'gap_follow'"])
         ),
     )
 
@@ -66,7 +90,9 @@ def generate_launch_description():
 
     return LaunchDescription([
         mode_arg,
+        algorithm_arg,
         teleop_node,
         stanley_node,
+        gap_follow_node,
         viz_node,
     ])
