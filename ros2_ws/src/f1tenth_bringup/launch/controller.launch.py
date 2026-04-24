@@ -80,8 +80,8 @@ def generate_launch_description():
 
     viz_node = Node(
         package="f1tenth_viz",
-        executable="stanley_viz.py",
-        name="stanley_viz_node",
+        executable="viz.py",
+        name="viz_node",
         output="screen",
         condition=IfCondition(
             PythonExpression(["'", LaunchConfiguration("mode"), "' == 'auto'"])

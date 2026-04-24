@@ -11,9 +11,9 @@ from geometry_msgs.msg import PoseStamped
 from ament_index_python.packages import get_package_share_directory
 
 
-class StanleyViz(Node):
+class ControllerViz(Node):
     def __init__(self):
-        super().__init__("stanley_viz_node")
+        super().__init__("viz_node")
 
         self.declare_parameter("waypoints_path", "")
 
@@ -64,7 +64,7 @@ class StanleyViz(Node):
 
 def main(args=None):
     rclpy.init(args=args)
-    node = StanleyViz()
+    node = ControllerViz()
     rclpy.spin(node)
     node.destroy_node()
     rclpy.shutdown()
