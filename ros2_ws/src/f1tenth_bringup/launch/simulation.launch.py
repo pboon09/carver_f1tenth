@@ -9,11 +9,6 @@ from launch.substitutions import Command, LaunchConfiguration
 from launch_ros.actions import Node
 
 
-MAPS_DIR = os.path.expanduser(
-    "~/carver_f1tenth/ros2_ws/src/f1tenth_gym_ros/maps"
-)
-
-
 def launch_setup(context):
     gym_ros_dir = get_package_share_directory("f1tenth_gym_ros")
     config_path = os.path.join(gym_ros_dir, "config", "sim.yaml")
@@ -24,8 +19,9 @@ def launch_setup(context):
     params = config_dict["bridge"]["ros__parameters"]
     has_opp = params["num_agent"] > 1
 
+    maps_dir = os.path.join(gym_ros_dir, "maps")
     map_name = LaunchConfiguration("map").perform(context)
-    map_path = os.path.realpath(os.path.join(MAPS_DIR, map_name))
+    map_path = os.path.realpath(os.path.join(maps_dir, map_name))
     params["map_path"] = map_path
 
     patched_config = tempfile.NamedTemporaryFile(

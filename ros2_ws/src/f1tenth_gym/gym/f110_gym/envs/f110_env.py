@@ -158,6 +158,21 @@ class F110Env(gym.Env):
         except:
             self.lidar_dist = 0.0
 
+        try:
+            self.num_beams = kwargs['num_beams']
+        except:
+            self.num_beams = 1080
+
+        try:
+            self.fov = kwargs['fov']
+        except:
+            self.fov = 4.7
+
+        try:
+            self.max_range = kwargs['max_range']
+        except:
+            self.max_range = 30.0
+
         # radius to consider done
         self.start_thresh = 0.5  # 10cm
 
@@ -189,7 +204,7 @@ class F110Env(gym.Env):
         self.start_rot = np.eye(2)
 
         # initiate stuff
-        self.sim = Simulator(self.params, self.num_agents, self.seed, time_step=self.timestep, integrator=self.integrator, lidar_dist=self.lidar_dist)
+        self.sim = Simulator(self.params, self.num_agents, self.seed, time_step=self.timestep, integrator=self.integrator, lidar_dist=self.lidar_dist, num_beams=self.num_beams, fov=self.fov, max_range=self.max_range)
         self.sim.set_map(self.map_path, self.map_ext)
 
         # stateful observations for rendering

@@ -38,8 +38,8 @@ bridge:
     scan_distance_to_base_link: 0.275
     
     # laserscan parameters
-    scan_fov: 4.7
-    scan_beams: 1080
+    scan_fov: 6.28318530718  # 360 deg, RPLidar S3
+    scan_beams: 3200          # 32000 Hz sample rate / 10 Hz scan rate
 
     # map parameters
     map_path: '/home/carver/carver_f1tenth/ros2_ws/src/f1tenth_gym_ros/maps/Spielberg_map'

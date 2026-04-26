@@ -23,7 +23,7 @@
 import rclpy
 from rclpy.node import Node
 
-from sensor_msgs.msg import LaserScan
+from sensor_msgs.msg import LaserScan, Imu
 from nav_msgs.msg import Odometry
 from geometry_msgs.msg import PoseStamped
 from geometry_msgs.msg import PoseWithCovarianceStamped
@@ -34,9 +34,9 @@ from geometry_msgs.msg import Quaternion
 from ackermann_msgs.msg import AckermannDriveStamped
 from tf2_ros import TransformBroadcaster
 
-import gym
 import numpy as np
 from transforms3d import euler
+from f110_gym.envs import F110Env
 
 class GymBridge(Node):
     def __init__(self):
@@ -74,11 +74,15 @@ class GymBridge(Node):
             raise ValueError('num_agents should be an int.')
 
         # env backend
-        self.env = gym.make('f110_gym:f110-v0',
+        self.scan_max_range = 40.0
+        self.env = F110Env(
                             map=self.get_parameter('map_path').value,
                             map_ext=self.get_parameter('map_img_ext').value,
                             num_agents=num_agents,
-                            lidar_dist=self.get_parameter("scan_distance_to_base_link").value
+                            lidar_dist=self.get_parameter("scan_distance_to_base_link").value,
+                            num_beams=self.get_parameter('scan_beams').value,
+                            fov=self.get_parameter('scan_fov').value,
+                            max_range=self.scan_max_range,
                             )
 
         sx = self.get_parameter('sx').value
@@ -86,6 +90,17 @@ class GymBridge(Node):
         stheta = self.get_parameter('stheta').value
         self.ego_pose = [sx, sy, stheta]
         self.ego_speed = [0.0, 0.0, 0.0]
+        self.ego_prev_speed = [0.0, 0.0, 0.0]  # for IMU accel differentiation
+
+        # BNO055 noise parameters (datasheet Table 0-2, fusion / NDOF mode)
+        # Accelerometer: noise density 150 µg/√Hz, BW ≈ 63 Hz in NDOF
+        self._accel_noise_std = 150e-6 * 9.80665 * (63.0 ** 0.5)   # ≈ 0.01168 m/s²
+        # Gyroscope: 0.014 °/s/√Hz, BW = 47 Hz → σ = 1.675e-3 rad/s
+        self._gyro_noise_std  = 0.014 * (np.pi / 180.0) * (47.0 ** 0.5)
+        # Orientation (fusion): heading ±2.5°, roll/pitch ±1° (treated as 1-sigma)
+        self._orient_std_yaw  = 2.5  * (np.pi / 180.0)   # rad
+        self._orient_std_rp   = 1.0  * (np.pi / 180.0)   # rad
+
         self.ego_requested_speed = 0.0
         self.ego_steer = 0.0
         self.ego_collision = False
@@ -128,8 +143,12 @@ class GymBridge(Node):
 
         # sim physical step timer
         self.drive_timer = self.create_timer(0.01, self.drive_timer_callback)
-        # topic publishing timer
+        # odom + tf publishing timer (250 Hz)
         self.timer = self.create_timer(0.004, self.timer_callback)
+        # LiDAR timer: RPLidar S3 scan rate = 10 Hz
+        self.scan_timer = self.create_timer(0.1, self.scan_timer_callback)
+        # IMU timer: BNO055 NDOF fusion output rate = 100 Hz
+        self.imu_timer = self.create_timer(0.01, self.imu_timer_callback)
 
         # transform broadcaster
         self.br = TransformBroadcaster(self)
@@ -137,6 +156,7 @@ class GymBridge(Node):
         # publishers
         self.ego_scan_pub = self.create_publisher(LaserScan, ego_scan_topic, 10)
         self.ego_odom_pub = self.create_publisher(Odometry, ego_odom_topic, 10)
+        self.ego_imu_pub  = self.create_publisher(Imu, self.ego_namespace + '/imu', 10)
         self.ego_drive_published = False
         if num_agents == 2:
             self.opp_scan_pub = self.create_publisher(LaserScan, opp_scan_topic, 10)
@@ -233,19 +253,21 @@ class GymBridge(Node):
             self.obs, _, self.done, _ = self.env.step(np.array([[self.ego_steer, self.ego_requested_speed], [self.opp_steer, self.opp_requested_speed]]))
         self._update_sim_state()
 
-    def timer_callback(self):
+    def scan_timer_callback(self):
+        """Publish LiDAR scans at 10 Hz — RPLidar S3 scan rate."""
         ts = self.get_clock().now().to_msg()
 
-        # pub scans
         scan = LaserScan()
         scan.header.stamp = ts
         scan.header.frame_id = self.ego_namespace + '/laser'
         scan.angle_min = self.angle_min
         scan.angle_max = self.angle_max
         scan.angle_increment = self.angle_inc
-        scan.range_min = 0.
-        scan.range_max = 30.
-        scan.ranges = self.ego_scan
+        scan.range_min = 0.05
+        scan.range_max = 40.
+        ego_ranges = np.array(self.ego_scan)
+        ego_ranges[ego_ranges >= self.scan_max_range - 1.0] = float('inf')
+        scan.ranges = ego_ranges.tolist()
         self.ego_scan_pub.publish(scan)
 
         if self.has_opp:
@@ -257,8 +279,13 @@ class GymBridge(Node):
             opp_scan.angle_increment = self.angle_inc
             opp_scan.range_min = 0.
             opp_scan.range_max = 30.
-            opp_scan.ranges = self.opp_scan
+            opp_ranges = np.array(self.opp_scan)
+            opp_ranges[opp_ranges >= self.scan_max_range - 1.0] = float('inf')
+            opp_scan.ranges = opp_ranges.tolist()
             self.opp_scan_pub.publish(opp_scan)
+
+    def timer_callback(self):
+        ts = self.get_clock().now().to_msg()
 
         # pub tf
         self._publish_odom(ts)
@@ -285,6 +312,56 @@ class GymBridge(Node):
         self.ego_speed[2] = self.obs['ang_vels_z'][0]
 
         
+
+    def imu_timer_callback(self):
+        ts = self.get_clock().now().to_msg()
+        self._publish_imu(ts)
+
+    def _publish_imu(self, ts):
+        """Publish simulated IMU data with BNO055 noise characteristics (100 Hz)."""
+        dt = 0.01  # BNO055 NDOF output period (100 Hz)
+        theta = self.ego_pose[2]
+
+        # --- Orientation (yaw-only for planar car, fusion mode accuracy) ---
+        noisy_yaw = theta + np.random.normal(0.0, self._orient_std_yaw)
+        imu = Imu()
+        imu.header.stamp = ts
+        imu.header.frame_id = self.ego_namespace + '/imu'
+        imu.orientation.x = 0.0
+        imu.orientation.y = 0.0
+        imu.orientation.z = float(np.sin(noisy_yaw / 2.0))
+        imu.orientation.w = float(np.cos(noisy_yaw / 2.0))
+        ov = self._orient_std_rp ** 2
+        yv = self._orient_std_yaw ** 2
+        imu.orientation_covariance = [ov, 0., 0.,   # roll
+                                      0., ov, 0.,   # pitch
+                                      0., 0., yv]   # yaw
+
+        # --- Angular velocity (only z from sim; x/y are zero + noise) ---
+        gv = self._gyro_noise_std ** 2
+        imu.angular_velocity.x = float(np.random.normal(0.0, self._gyro_noise_std))
+        imu.angular_velocity.y = float(np.random.normal(0.0, self._gyro_noise_std))
+        imu.angular_velocity.z = float(self.ego_speed[2] + np.random.normal(0.0, self._gyro_noise_std))
+        imu.angular_velocity_covariance = [gv, 0., 0.,
+                                           0., gv, 0.,
+                                           0., 0., gv]
+
+        # --- Linear acceleration (differentiate world-frame velocity → body frame) ---
+        ax_w = (self.ego_speed[0] - self.ego_prev_speed[0]) / dt
+        ay_w = (self.ego_speed[1] - self.ego_prev_speed[1]) / dt
+        cos_t, sin_t = np.cos(theta), np.sin(theta)
+        ax_b =  cos_t * ax_w + sin_t * ay_w
+        ay_b = -sin_t * ax_w + cos_t * ay_w
+        av = self._accel_noise_std ** 2
+        imu.linear_acceleration.x = float(ax_b + np.random.normal(0.0, self._accel_noise_std))
+        imu.linear_acceleration.y = float(ay_b + np.random.normal(0.0, self._accel_noise_std))
+        imu.linear_acceleration.z = float(9.80665  + np.random.normal(0.0, self._accel_noise_std))  # gravity
+        imu.linear_acceleration_covariance = [av, 0., 0.,
+                                              0., av, 0.,
+                                              0., 0., av]
+
+        self.ego_prev_speed = list(self.ego_speed)
+        self.ego_imu_pub.publish(imu)
 
     def _publish_odom(self, ts):
         ego_odom = Odometry()
