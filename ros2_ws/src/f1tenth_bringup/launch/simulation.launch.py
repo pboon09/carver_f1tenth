@@ -106,12 +106,21 @@ def launch_setup(context):
         remappings=[("/robot_description", "opp_robot_description")],
     )
 
+    # Static map→odom identity: gym provides ground-truth, no odometry drift in sim
+    static_map_odom = Node(
+        package="tf2_ros",
+        executable="static_transform_publisher",
+        name="static_map_odom",
+        arguments=["0", "0", "0", "0", "0", "0", "map", "odom"],
+    )
+
     nodes = [
         bridge_node,
         rviz_node,
         map_server_node,
         nav_lifecycle_node,
         ego_robot_publisher,
+        static_map_odom,
     ]
 
     if has_opp:

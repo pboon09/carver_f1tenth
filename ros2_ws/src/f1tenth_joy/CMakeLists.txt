@@ -29,6 +29,7 @@ ament_python_install_package(${PROJECT_NAME})
 install(PROGRAMS
   scripts/dummy_script.py
   scripts/teleop.py
+  scripts/slam_gui.py
   DESTINATION lib/${PROJECT_NAME}
 )
 

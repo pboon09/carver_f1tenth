@@ -3,8 +3,9 @@ import os
 from ament_index_python.packages import get_package_share_directory
 from launch import LaunchDescription
 from launch.actions import DeclareLaunchArgument, IncludeLaunchDescription, TimerAction
+from launch.conditions import IfCondition
 from launch.launch_description_sources import PythonLaunchDescriptionSource
-from launch.substitutions import LaunchConfiguration
+from launch.substitutions import LaunchConfiguration, PythonExpression
 
 
 def generate_launch_description():
@@ -20,7 +21,7 @@ def generate_launch_description():
     mode_arg = DeclareLaunchArgument(
         "mode",
         default_value="manual",
-        description="Controller mode: manual or auto",
+        description="Controller mode: manual, auto, or slam",
     )
 
     simulation_launch = IncludeLaunchDescription(
@@ -28,6 +29,19 @@ def generate_launch_description():
             os.path.join(launch_dir, "simulation.launch.py")
         ),
         launch_arguments={"map": LaunchConfiguration("map")}.items(),
+        condition=IfCondition(
+            PythonExpression(["'", LaunchConfiguration("mode"), "' != 'slam'"])
+        ),
+    )
+
+    slam_launch = IncludeLaunchDescription(
+        PythonLaunchDescriptionSource(
+            os.path.join(launch_dir, "slam.launch.py")
+        ),
+        launch_arguments={"map": LaunchConfiguration("map")}.items(),
+        condition=IfCondition(
+            PythonExpression(["'", LaunchConfiguration("mode"), "' == 'slam'"])
+        ),
     )
 
     controller_launch = TimerAction(
@@ -40,6 +54,9 @@ def generate_launch_description():
                 launch_arguments={"mode": LaunchConfiguration("mode")}.items(),
             ),
         ],
+        condition=IfCondition(
+            PythonExpression(["'", LaunchConfiguration("mode"), "' != 'slam'"])
+        ),
     )
 
     return LaunchDescription(
@@ -47,6 +64,7 @@ def generate_launch_description():
             map_arg,
             mode_arg,
             simulation_launch,
+            slam_launch,
             controller_launch,
         ]
     )
