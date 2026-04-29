@@ -78,6 +78,46 @@ def generate_launch_description():
         ),
     )
 
+    purepursuit_node = Node(
+        package="f1tenth_controller",
+        executable="pure_pursuit.py",
+        name="pure_pursuit_node",
+        output="screen",
+        parameters=[
+            {"velocity": 5.0},
+            {"min_lookahead": 0.6},
+            {"max_lookahead": 2.5},
+            {"max_gain": 0.8},
+            {"D": 2.0},
+        ],
+        condition=IfCondition(
+            PythonExpression(["'", LaunchConfiguration("mode"), "' == 'auto' and '", LaunchConfiguration("algorithm"), "' == 'pure_pursuit'"])
+        ),
+    )
+
+    lattice_node = Node(
+        package="f1tenth_controller",
+        executable="lattice_planner.py",
+        name="lattice_planner_node",
+        output="screen",
+        parameters=[
+            {"plan_horizon":  5.0},   # m ahead — see obstacles earlier
+            {"num_offsets":   11},    # finer lateral steps
+            {"max_offset":    1.2},   # wider avoidance range
+            {"safety_radius": 0.6},   # larger margin = detect sooner
+            {"w_deviation":   1.0},
+            {"w_smooth":      0.3},
+            {"min_lookahead": 0.8},
+            {"max_lookahead": 2.0},
+            {"speed_gain":    0.4},
+            {"steer_gain":    1.0},
+            {"steer_limit":   0.41},
+        ],
+        condition=IfCondition(
+            PythonExpression(["'", LaunchConfiguration("mode"), "' == 'auto' and '", LaunchConfiguration("algorithm"), "' == 'lattice'"])
+        ),
+    )
+
     viz_node = Node(
         package="f1tenth_viz",
         executable="viz.py",
@@ -94,5 +134,7 @@ def generate_launch_description():
         teleop_node,
         stanley_node,
         gap_follow_node,
+        purepursuit_node,
+        lattice_node,
         viz_node,
     ])
