@@ -30,6 +30,8 @@ install(PROGRAMS
   scripts/dummy_script.py
   scripts/stanley_avoidance.py
   scripts/gap_follow.py
+  scripts/pure_pursuit.py
+  scripts/lattice_planner.py
   DESTINATION lib/${PROJECT_NAME}
 )
 

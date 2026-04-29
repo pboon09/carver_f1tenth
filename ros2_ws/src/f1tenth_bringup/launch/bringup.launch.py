@@ -23,6 +23,12 @@ def generate_launch_description():
         description="Controller mode: manual or auto",
     )
 
+    algorithm_arg = DeclareLaunchArgument(
+        "algorithm",
+        default_value="stanley",
+        description="Control algorithm: stanley, gap_follow, pure_pursuit, or lattice",
+    )
+
     simulation_launch = IncludeLaunchDescription(
         PythonLaunchDescriptionSource(
             os.path.join(launch_dir, "simulation.launch.py")
@@ -37,7 +43,10 @@ def generate_launch_description():
                 PythonLaunchDescriptionSource(
                     os.path.join(launch_dir, "controller.launch.py")
                 ),
-                launch_arguments={"mode": LaunchConfiguration("mode")}.items(),
+                launch_arguments={
+                    "mode": LaunchConfiguration("mode"),
+                    "algorithm": LaunchConfiguration("algorithm"),
+                }.items(),
             ),
         ],
     )
@@ -46,6 +55,7 @@ def generate_launch_description():
         [
             map_arg,
             mode_arg,
+            algorithm_arg,
             simulation_launch,
             controller_launch,
         ]
