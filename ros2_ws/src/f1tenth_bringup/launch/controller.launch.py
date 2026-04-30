@@ -109,10 +109,10 @@ def generate_launch_description():
             {"w_deviation":   0.35},
             {"w_smooth":      0.3},
             {"w_clearance":   8.0},
-            {"min_lookahead": 0.6},
-            {"max_lookahead": 1.6},
+            {"min_lookahead": 0.8},
+            {"max_lookahead": 1.8},
             {"speed_gain":    0.4},
-            {"steer_gain":    1.0},
+            {"steer_gain":    0.8},
             {"steer_limit":   0.41},
         ],
         condition=IfCondition(

@@ -96,7 +96,7 @@ class LatticePlanner(Node):
         #    These apply whenever an obstacle point is in front, regardless of
         #    whether the planner has committed to an offset yet.
         self.declare_parameter("obs_approach_slow_start", 2.0)  # m — begin braking
-        self.declare_parameter("obs_approach_min_speed",  0.50) # fraction of wp speed
+        self.declare_parameter("obs_approach_min_speed",  0.55) # fraction of wp speed
 
         p = lambda name: self.get_parameter(name).value
         self.plan_horizon       = p("plan_horizon")
