@@ -48,7 +48,7 @@ def launch_setup(context):
         name="rviz",
         arguments=[
             "-d",
-            os.path.join(bringup_dir, "rviz", "stanley.rviz"),
+            os.path.join(bringup_dir, "rviz", "pure_pursuit.rviz"),
         ],
     )
 

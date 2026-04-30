@@ -29,7 +29,7 @@ class ControllerViz(Node):
 
         if not waypoints_path:
             pkg_share = get_package_share_directory("f1tenth_controller")
-            waypoints_path = os.path.join(pkg_share, "path", "path.yaml")
+            waypoints_path = os.path.join(pkg_share, "path", "path_v.yaml")
 
         with open(waypoints_path, "r") as f:
             data = yaml.safe_load(f)
