@@ -44,7 +44,7 @@ BTN_RECT      = pygame.Rect(910, 820, 180, 60)
 
 GRAPH_BUF     = 300   # ~10 s at 30 fps
 
-MAX_SPEED    = 2.0
+MAX_SPEED    = 10.0
 MAX_STEER    = 0.4
 SPEED_STEP   = 0.25
 STEER_STEP   = 0.05
@@ -61,6 +61,7 @@ class SlamGui(Node):
         self._robot_x       = 0.0
         self._robot_y       = 0.0
         self._robot_yaw     = 0.0
+        self._real_speed    = 0.0
         # SLAM estimated pose (from map→base_link TF)
         self._slam_x        = None
         self._slam_y        = None
@@ -107,6 +108,7 @@ class SlamGui(Node):
             self._robot_x   = msg.pose.pose.position.x
             self._robot_y   = msg.pose.pose.position.y
             self._robot_yaw = yaw
+            self._real_speed = msg.twist.twist.linear.x
 
     def _stanley_cb(self, msg: AckermannDriveStamped):
         with self._lock:
@@ -185,7 +187,7 @@ class SlamGui(Node):
                 self._map_info,
                 self._robot_x,  self._robot_y,  self._robot_yaw,   # ground truth
                 self._slam_x,   self._slam_y,   self._slam_yaw,    # SLAM estimate
-                spd, steer, ap,
+                spd, steer, ap, self._real_speed,
             )
 
 
@@ -304,7 +306,7 @@ def draw_autopilot_btn(surf, font, rect, active):
 
 
 def draw_panel(surf, font_big, font_sm, speed, steer, has_map, autopilot,
-               pos_err, yaw_err, ap_scale, rect):
+               pos_err, yaw_err, ap_scale, rect, real_speed):
     pygame.draw.rect(surf, C_PANEL, rect)
     x, y = rect.x + 10, rect.y + 15
     lh   = 28
@@ -323,7 +325,8 @@ def draw_panel(surf, font_big, font_sm, speed, steer, has_map, autopilot,
     y += 6
 
     txt("── Drive ──", C_WARN)
-    txt(f"Speed {speed:+.2f} m/s")
+    txt(f"Cmd   {speed:+.2f} m/s")
+    txt(f"Real  {real_speed:+.2f} m/s")
     txt(f"Steer {math.degrees(steer):+.1f} °")
     if autopilot:
         sc_col = C_AP_ON if 0.9 <= ap_scale <= 1.1 else C_WARN
@@ -437,7 +440,7 @@ def main():
 
         # ── render ───────────────────────────────────────────────────────────
         screen.fill(C_BG)
-        map_rgb, info, rx, ry, ryaw, sx, sy, syaw, spd, steer, autopilot = node.get_render_state()
+        map_rgb, info, rx, ry, ryaw, sx, sy, syaw, spd, steer, autopilot, real_speed = node.get_render_state()
 
         # map + robots
         if map_rgb is not None:
@@ -497,7 +500,7 @@ def main():
         # panel + button
         draw_panel(screen, font_big, font_sm, spd, steer,
                    map_rgb is not None, autopilot, pos_err, dyaw,
-                   node.get_ap_speed_scale(), PANEL_RECT)
+                   node.get_ap_speed_scale(), PANEL_RECT, real_speed)
         draw_autopilot_btn(screen, font_btn, BTN_RECT, autopilot)
 
         pygame.display.flip()

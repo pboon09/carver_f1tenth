@@ -30,7 +30,7 @@ slam_toolbox:
 
     # ---------- Sensor ----------
     max_laser_range: 40.0           # RPLidar S3 max range (m)
-    minimum_travel_distance: 0.2    # min movement (m) before new scan is processed
+    minimum_travel_distance: 0.25    # min movement (m) before new scan is processed
     minimum_travel_heading: 0.1     # min rotation (rad) before new scan is processed
 
     # ---------- Map ----------
@@ -75,6 +75,6 @@ slam_toolbox:
 
     # ---------- Misc ----------
     debug_logging: false
-    throttle_scans: 1
+    throttle_scans: 2
     stack_size_to_use: 40000000
     enable_interactive_mode: true
