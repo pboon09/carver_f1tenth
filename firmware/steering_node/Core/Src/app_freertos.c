@@ -255,6 +255,7 @@ void subscription_callback(const void *msgin) {
 	const std_msgs__msg__Float32 *float32_msg =
 			(const std_msgs__msg__Float32*) msgin;
 
+	//min 2.5 max 12.0 mid 7.25
 	duty = float32_msg->data;
 	if (duty != duty_prev) {
 		PWM_write_duty(&servo, 50, duty);
