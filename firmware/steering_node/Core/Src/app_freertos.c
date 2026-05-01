@@ -25,6 +25,16 @@
 
 /* Private includes ----------------------------------------------------------*/
 /* USER CODE BEGIN Includes */
+#include <rcl/rcl.h>
+#include <rcl/error_handling.h>
+#include <rclc/rclc.h>
+#include <rclc/executor.h>
+#include <uxr/client/transport.h>
+#include <rmw_microxrcedds_c/config.h>
+#include <rmw_microros/rmw_microros.h>
+
+#include <std_msgs/msg/float32.h>
+
 #include "dma.h"
 #include "iwdg.h"
 #include "usart.h"
@@ -47,11 +57,27 @@ typedef StaticTask_t osStaticThreadDef_t;
 
 /* Private macro -------------------------------------------------------------*/
 /* USER CODE BEGIN PM */
-
+#define RCLSOFTCHECK(fn) if (fn!= RCL_RET_OK){};
 /* USER CODE END PM */
 
 /* Private variables ---------------------------------------------------------*/
 /* USER CODE BEGIN Variables */
+rcl_node_t node;
+rclc_support_t support;
+rcl_allocator_t allocator;
+rcl_init_options_t init_options;
+rclc_executor_t executor;
+
+rcl_publisher_t publisher;
+rcl_subscription_t subscriber;
+
+std_msgs__msg__Float32 pub_msg;
+std_msgs__msg__Float32 sub_msg;
+
+rcl_timer_t timer;
+const unsigned int timer_period = RCL_MS_TO_NS(10);
+const int timeout_ms = 1000;
+
 PWM servo;
 
 float duty = 7.5f;
@@ -72,7 +98,21 @@ const osThreadAttr_t defaultTask_attributes = {
 
 /* Private function prototypes -----------------------------------------------*/
 /* USER CODE BEGIN FunctionPrototypes */
+bool cubemx_transport_open(struct uxrCustomTransport *transport);
+bool cubemx_transport_close(struct uxrCustomTransport *transport);
+size_t cubemx_transport_write(struct uxrCustomTransport *transport,
+		const uint8_t *buf, size_t len, uint8_t *err);
+size_t cubemx_transport_read(struct uxrCustomTransport *transport, uint8_t *buf,
+		size_t len, int timeout, uint8_t *err);
 
+void* microros_allocate(size_t size, void *state);
+void microros_deallocate(void *pointer, void *state);
+void* microros_reallocate(void *pointer, size_t size, void *state);
+void* microros_zero_allocate(size_t number_of_elements, size_t size_of_element,
+		void *state);
+
+void timer_callback(rcl_timer_t *timer, int64_t last_call_time);
+void subscription_callback(const void *msgin);
 /* USER CODE END FunctionPrototypes */
 
 void StartDefaultTask(void *argument);
@@ -130,12 +170,59 @@ void MX_FREERTOS_Init(void) {
 void StartDefaultTask(void *argument)
 {
   /* USER CODE BEGIN StartDefaultTask */
+	// micro-ROS configuration
+	rmw_uros_set_custom_transport(true, (void*) &hlpuart1,
+			cubemx_transport_open, cubemx_transport_close,
+			cubemx_transport_write, cubemx_transport_read);
+
+	rcl_allocator_t freeRTOS_allocator =
+			rcutils_get_zero_initialized_allocator();
+	freeRTOS_allocator.allocate = microros_allocate;
+	freeRTOS_allocator.deallocate = microros_deallocate;
+	freeRTOS_allocator.reallocate = microros_reallocate;
+	freeRTOS_allocator.zero_allocate = microros_zero_allocate;
+
+	if (!rcutils_set_default_allocator(&freeRTOS_allocator)) {
+		printf("Error on default allocators (line %d)\n", __LINE__);
+	}
+	allocator = rcl_get_default_allocator();
+
+	//create init
+	init_options = rcl_get_zero_initialized_init_options();
+	RCLSOFTCHECK(rcl_init_options_init(&init_options, allocator));
+	RCLSOFTCHECK(rcl_init_options_set_domain_id(&init_options, 127));
+
+	//create support
+	rclc_support_init_with_options(&support, 0, NULL, &init_options,
+			&allocator);
+
+	// create node
+	rclc_node_init_default(&node, "steering_node", "", &support);
+
+	// Create publisher
+	rclc_publisher_init_default(&publisher, &node,
+			ROSIDL_GET_MSG_TYPE_SUPPORT(std_msgs, msg, Float32),
+			"uros_heartbeat");
+
+	// Create subscriber
+	rclc_subscription_init_default(&subscriber, &node,
+			ROSIDL_GET_MSG_TYPE_SUPPORT(std_msgs, msg, Float32),
+			"steering_angle");
+
+	//create timer
+	rclc_timer_init_default(&timer, &support, timer_period, timer_callback);
+
+	//create executor
+	executor = rclc_executor_get_zero_initialized_executor();
+	rclc_executor_init(&executor, &support.context, 2, &allocator); // total number of handles = #subscriptions + #timers + #clients + #service (Should not handle too much)
+	rclc_executor_add_timer(&executor, &timer);
+	rclc_executor_add_subscription(&executor, &subscriber, &sub_msg,
+			&subscription_callback, ON_NEW_DATA);
+	rclc_executor_spin(&executor);
+
 	/* Infinite loop */
 	for (;;) {
-        if (duty != duty_prev) {
-            PWM_write_duty(&servo, 50, duty);
-            duty_prev = duty;
-        }
+
 		osDelay(1);
 	}
   /* USER CODE END StartDefaultTask */
@@ -143,21 +230,50 @@ void StartDefaultTask(void *argument)
 
 /* Private application code --------------------------------------------------*/
 /* USER CODE BEGIN Application */
-void HAL_TIM_PeriodElapsedCallback(TIM_HandleTypeDef *htim)
-{
-  /* USER CODE BEGIN Callback 0 */
+void timer_callback(rcl_timer_t *timer, int64_t last_call_time) {
+	static uint8_t cnt = 0;
 
-  /* USER CODE END Callback 0 */
-  if (htim->Instance == TIM1)
-  {
-    HAL_IncTick();
-  }
-  /* USER CODE BEGIN Callback 1 */
-  if (htim->Instance == TIM2)
-  {
+	if (timer != NULL) {
+		// Sync micro-ROS session
+		rmw_uros_sync_session(timeout_ms);
 
-  }
-  /* USER CODE END Callback 1 */
+		// Toggle LED every 50 cycles (approximately every 0.5 seconds)
+		if (cnt == 0)
+			HAL_GPIO_TogglePin(LD2_GPIO_Port, LD2_Pin);
+		cnt = (cnt + 1) % 50;
+
+		pub_msg.data = 1.0;
+		// Publish the multi-array message
+		RCLSOFTCHECK(rcl_publish(&publisher, &pub_msg, NULL));
+
+		// Reinitialize watchdog timer
+		HAL_IWDG_Init(&hiwdg);
+	}
+}
+
+void subscription_callback(const void *msgin) {
+	const std_msgs__msg__Float32 *float32_msg =
+			(const std_msgs__msg__Float32*) msgin;
+
+	duty = float32_msg->data;
+	if (duty != duty_prev) {
+		PWM_write_duty(&servo, 50, duty);
+		duty_prev = duty;
+	}
+}
+
+void HAL_TIM_PeriodElapsedCallback(TIM_HandleTypeDef *htim) {
+	/* USER CODE BEGIN Callback 0 */
+
+	/* USER CODE END Callback 0 */
+	if (htim->Instance == TIM1) {
+		HAL_IncTick();
+	}
+	/* USER CODE BEGIN Callback 1 */
+	if (htim->Instance == TIM2) {
+
+	}
+	/* USER CODE END Callback 1 */
 }
 /* USER CODE END Application */
 
