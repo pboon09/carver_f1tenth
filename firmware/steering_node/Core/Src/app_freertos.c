@@ -26,7 +26,7 @@
 /* Private includes ----------------------------------------------------------*/
 /* USER CODE BEGIN Includes */
 #include "dma.h"
-//#include "iwdg.h"
+#include "iwdg.h"
 #include "usart.h"
 #include "tim.h"
 #include "gpio.h"
