@@ -185,3 +185,16 @@ python3 -m f1tenth_controller.raceline_generator \
 | `/initialpose` | `geometry_msgs/PoseWithCovarianceStamped` | Reset car pose |
 
 Note: The gym simulator does not provide IMU data, so you can use orientation information from `/ego_racecar/odom`.
+
+### Dependencies
+```bash
+sudo apt update
+sudo apt install -y git build-essential python3-dev python3-pip \
+  libgl1-mesa-dev libglu1-mesa-dev libeigen3-dev fontconfig libfreetype6-dev tmux \
+  gcc-arm-none-eabi docker.io
+
+pip3 install --upgrade pip
+pip3 install bno055-usb-stick-py PyOpenGL PyOpenGL_accelerate transforms3d
+# if you want the gym Python package (editable):
+pip3 install -e ros2_ws/src/f1tenth_gym
+```
