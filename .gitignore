@@ -7,3 +7,5 @@
 /sensor_ws/build
 /sensor_ws/install
 /sensor_ws/log
+/firmware/.metadata
+/firmware/steering_node/Debug
