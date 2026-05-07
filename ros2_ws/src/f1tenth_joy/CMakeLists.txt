@@ -29,6 +29,7 @@ ament_python_install_package(${PROJECT_NAME})
 install(PROGRAMS
   scripts/dummy_script.py
   scripts/teleop.py
+  scripts/joystick.py
   DESTINATION lib/${PROJECT_NAME}
 )
 
@@ -49,6 +50,7 @@ install(TARGETS
 ################ INSTALL LAUNCH, ETC #################
 install(DIRECTORY
   # add directories here
+
   DESTINATION share/${PROJECT_NAME})
 
 ament_package()
