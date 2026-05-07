@@ -80,7 +80,7 @@ const int timeout_ms = 1000;
 
 PWM servo;
 
-float duty = 7.5f;
+float duty = 7.25f;
 float duty_prev = -1.0f;
 /* USER CODE END Variables */
 /* Definitions for defaultTask */
