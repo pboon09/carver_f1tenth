@@ -1,3 +1,6 @@
+import os
+
+from ament_index_python.packages import get_package_share_directory
 from launch import LaunchDescription
 from launch.actions import DeclareLaunchArgument
 from launch.conditions import IfCondition
@@ -6,6 +9,8 @@ from launch_ros.actions import Node
 
 
 def generate_launch_description():
+    _pkg = get_package_share_directory("f1tenth_controller")
+
     mode_arg = DeclareLaunchArgument(
         "mode", default_value="manual",
         description="Controller mode: manual or auto"
@@ -14,6 +19,12 @@ def generate_launch_description():
     algorithm_arg = DeclareLaunchArgument(
         "algorithm", default_value="stanley",
         description="Control algorithm: stanley, gap_follow, pure_pursuit, or lattice"
+    )
+
+    # ── Single place to switch the raceline ──────────────────────────────────
+    raceline_arg = DeclareLaunchArgument(
+        "raceline", default_value=os.path.join(_pkg, "path", "path_v_mincurv.yaml"),
+        description="Absolute path to the waypoints yaml used by all controllers and viz"
     )
 
     teleop_node = Node(
@@ -84,6 +95,7 @@ def generate_launch_description():
         name="pure_pursuit_node",
         output="screen",
         parameters=[
+            {"waypoints_path": LaunchConfiguration("raceline")},
             {"velocity": 5.0},
             {"min_lookahead": 0.6},
             {"max_lookahead": 2.5},
@@ -101,19 +113,23 @@ def generate_launch_description():
         name="lattice_planner_node",
         output="screen",
         parameters=[
-            {"plan_horizon":  5.0},
-            {"num_offsets":   17},
-            {"max_offset":    1.6},
-            {"safety_radius": 0.6},
-            {"clearance_margin": 0.45},
-            {"w_deviation":   0.35},
-            {"w_smooth":      0.3},
-            {"w_clearance":   8.0},
-            {"min_lookahead": 0.8},
-            {"max_lookahead": 1.8},
-            {"speed_gain":    0.4},
-            {"steer_gain":    0.8},
-            {"steer_limit":   0.41},
+            {"waypoints_path":          LaunchConfiguration("raceline")},
+            {"max_offset":              1.0},
+            {"safety_radius":           0.35},
+            {"track_half_width":        0.70},
+            {"plan_horizon":            5.0},
+            {"num_offsets":             17},
+            {"w_deviation":             1.0},
+            {"w_continuity":            1.5},
+            {"min_lookahead":           0.8},
+            {"max_lookahead":           1.8},
+            {"speed_gain":              0.40},
+            {"steer_gain":              0.8},
+            {"steer_limit":             0.41},
+            {"imminent_dist":           0.40},
+            {"avoidance_speed_scale":   0.85},
+            {"replan_hold_ticks":       20},
+            {"clear_hold_ticks":        15},
         ],
         condition=IfCondition(
             PythonExpression(["'", LaunchConfiguration("mode"), "' == 'auto' and '", LaunchConfiguration("algorithm"), "' == 'lattice'"])
@@ -125,6 +141,9 @@ def generate_launch_description():
         executable="viz.py",
         name="viz_node",
         output="screen",
+        parameters=[
+            {"waypoints_path": LaunchConfiguration("raceline")},
+        ],
         condition=IfCondition(
             PythonExpression(["'", LaunchConfiguration("mode"), "' == 'auto'"])
         ),
@@ -133,6 +152,7 @@ def generate_launch_description():
     return LaunchDescription([
         mode_arg,
         algorithm_arg,
+        raceline_arg,
         teleop_node,
         stanley_node,
         gap_follow_node,

@@ -92,7 +92,7 @@ class PurePursuit(Node):
         path = str(self.get_parameter("waypoints_path").value)
         if not path:
             pkg_share = get_package_share_directory("f1tenth_controller")
-            path = os.path.join(pkg_share, "path", "path_v.yaml")
+            path = os.path.join(pkg_share, "path", "path_v_centerline.yaml")
 
         self.get_logger().info(f"Loading waypoints from: {path}")
         with open(path, "r") as f:
@@ -103,7 +103,7 @@ class PurePursuit(Node):
         # Load per-waypoint velocity if present, otherwise use fixed param
         if "v" in wp_list[0]:
             self.waypoint_velocities = np.array([wp["v"] for wp in wp_list])
-            self.get_logger().info("Using per-waypoint speed profile from path_v.yaml")
+            self.get_logger().info("Using per-waypoint speed profile from path_v_centerline.yaml")
         else:
             self.waypoint_velocities = None
         return xy

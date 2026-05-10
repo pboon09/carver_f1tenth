@@ -29,6 +29,14 @@ def generate_launch_description():
         description="Control algorithm: stanley, gap_follow, pure_pursuit, or lattice",
     )
 
+    raceline_arg = DeclareLaunchArgument(
+        "raceline",
+        default_value=os.path.join(
+            get_package_share_directory("f1tenth_controller"), "path", "path_v_mincurv.yaml"
+        ),
+        description="Absolute path to raceline yaml",
+    )
+
     simulation_launch = IncludeLaunchDescription(
         PythonLaunchDescriptionSource(
             os.path.join(launch_dir, "simulation.launch.py")
@@ -46,6 +54,7 @@ def generate_launch_description():
                 launch_arguments={
                     "mode": LaunchConfiguration("mode"),
                     "algorithm": LaunchConfiguration("algorithm"),
+                    "raceline": LaunchConfiguration("raceline"),
                 }.items(),
             ),
         ],
@@ -56,6 +65,7 @@ def generate_launch_description():
             map_arg,
             mode_arg,
             algorithm_arg,
+            raceline_arg,
             simulation_launch,
             controller_launch,
         ]
