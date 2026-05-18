@@ -7,7 +7,7 @@ from launch_ros.actions import Node
 def generate_launch_description():
     serial_port_arg = DeclareLaunchArgument(
         'serial_port',
-        default_value='/dev/ttyACM0',
+        default_value='/dev/ttyACM1',
         description='Serial port for VESC'
     )
 
@@ -18,7 +18,7 @@ def generate_launch_description():
     )
 
     vesc_node = Node(
-        package='vesc_driver',
+        package='f1tenth_vesc_driver',
         executable='vesc_node.py',
         name='vesc_node',
         parameters=[

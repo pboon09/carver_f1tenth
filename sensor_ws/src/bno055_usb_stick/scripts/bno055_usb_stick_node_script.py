@@ -27,8 +27,8 @@ class BNO055USBSTICKNode(Node):
 
         # Initialize BNO055 USB Stick
         try:
-            self.bno_usb_stick = BnoUsbStick(port='/dev/ttyACM0')
-            self.get_logger().info("BNO055 USB Stick connected on /dev/ttyACM0")
+            self.bno_usb_stick = BnoUsbStick(port='/dev/BNO_Stick')
+            self.get_logger().info("BNO055 USB Stick connected on /dev/BNO_Stick")
         except Exception as e:
             self.get_logger().error(f"Failed to connect to BNO055: {e}")
             raise

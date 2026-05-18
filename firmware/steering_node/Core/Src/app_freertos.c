@@ -254,7 +254,7 @@ void subscription_callback(const void *msgin) {
 
 	//min 2.5 max 12.0 mid 7.25 (Servo)
 	//min 5.5 max 9.0 mid 7.25
-	duty = float32_msg->data;
+	duty = (float32_msg->data +0.4f) * ((9.7f - 5.5f) / 0.8f) + 5.5f;
 }
 
 void HAL_TIM_PeriodElapsedCallback(TIM_HandleTypeDef *htim) {

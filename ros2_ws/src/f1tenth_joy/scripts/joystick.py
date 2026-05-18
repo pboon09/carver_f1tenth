@@ -75,7 +75,7 @@ class JoystickNode(Node):
             self.steering_publisher.publish(steering_cmd)
             return
 
-        left_stick_y = self.apply_axis_deadzone(1, self.current_joy.axes[1])
+        left_stick_y = self.apply_axis_deadzone(1, self.current_joy.axes[1]) * -1.0
         right_stick_x = self.apply_axis_deadzone(3, self.current_joy.axes[3])
 
         rpm_cmd.data = int(left_stick_y * self.max_rpm)
