@@ -9,3 +9,6 @@
 /sensor_ws/log
 /firmware/.metadata
 /firmware/steering_node/Debug
+/slam_ws/build
+/slam_ws/install
+/slam_ws/log
