@@ -1,0 +1,25 @@
+<?xml version="1.0"?>
+<?xml-model href="http://download.ros.org/schema/package_format3.xsd" schematypens="http://www.w3.org/2001/XMLSchema"?>
+<package format="3">
+  <name>f1tenth_slam</name>
+  <version>0.1.0</version>
+  <description>SLAM mapping bringup for the F1TENTH car (rplidar + BNO055 + slam_toolbox).</description>
+  <maintainer email="TODO@email.com">TODO</maintainer>
+  <license>BSD</license>
+
+  <buildtool_depend>ament_cmake</buildtool_depend>
+
+  <exec_depend>f1tenth_bringup</exec_depend>
+  <exec_depend>f1tenth_urdf</exec_depend>
+  <exec_depend>f1tenth_joy</exec_depend>
+  <exec_depend>f1tenth_vesc_driver</exec_depend>
+  <exec_depend>slam_toolbox</exec_depend>
+  <exec_depend>robot_localization</exec_depend>
+  <exec_depend>tf2_ros</exec_depend>
+  <exec_depend>robot_state_publisher</exec_depend>
+  <exec_depend>rviz2</exec_depend>
+
+  <export>
+    <build_type>ament_cmake</build_type>
+  </export>
+</package>

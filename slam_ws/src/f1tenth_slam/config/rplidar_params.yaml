@@ -1,0 +1,9 @@
+rplidar_node:
+  ros__parameters:
+    channel_type: serial
+    serial_port: /dev/ttyUSB0       # change to your udev symlink e.g. /dev/RPLIDAR if you have one
+    serial_baudrate: 460800         # RPLidar C1 default
+    frame_id: laser
+    inverted: false
+    angle_compensate: true
+    scan_mode: Standard

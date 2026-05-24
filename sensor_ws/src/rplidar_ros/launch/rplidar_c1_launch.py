@@ -12,12 +12,16 @@ from launch_ros.actions import Node
 
 def generate_launch_description():
     channel_type =  LaunchConfiguration('channel_type', default='serial')
-    serial_port = LaunchConfiguration('serial_port', default='/dev/ttyUSB0')
+    serial_port = LaunchConfiguration('serial_port', default='/dev/rplidar')
     serial_baudrate = LaunchConfiguration('serial_baudrate', default='460800')
     frame_id = LaunchConfiguration('frame_id', default='laser')
     inverted = LaunchConfiguration('inverted', default='false')
     angle_compensate = LaunchConfiguration('angle_compensate', default='true')
     scan_mode = LaunchConfiguration('scan_mode', default='Standard')
+    # On this car the published scan came out rotated 180° from the arrow
+    # (arrow forward, RViz showed returns at -x). flip_x_axis shifts scan
+    # indices by N/2 to undo that rotation in the driver itself.
+    flip_x_axis = LaunchConfiguration('flip_x_axis', default='true')
 
     return LaunchDescription([
         DeclareLaunchArgument(
@@ -55,6 +59,12 @@ def generate_launch_description():
             default_value=scan_mode,
             description='Specifying scan mode of lidar'),
 
+        DeclareLaunchArgument(
+            'flip_x_axis',
+            default_value=flip_x_axis,
+            description='Rotate scan indices by 180° so the arrow direction '
+                        'lands at +x (set true for this car)'),
+
         Node(
             package='rplidar_ros',
             executable='rplidar_node',
@@ -65,7 +75,8 @@ def generate_launch_description():
                          'frame_id': frame_id,
                          'inverted': inverted,
                          'angle_compensate': angle_compensate,
-                         'scan_mode': scan_mode}],
+                         'scan_mode': scan_mode,
+                         'flip_x_axis': flip_x_axis}],
             output='screen'),
     ])
 

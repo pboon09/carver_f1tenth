@@ -1,0 +1,33 @@
+# BNO055 intrinsic / calibration reference
+# ----------------------------------------
+# The bno055_usb_stick driver in this workspace does NOT yet read these from
+# ROS params — calibration values are hard-coded inside its imu_reset() routine
+# (bno055_usb_stick/scripts/bno055_usb_stick_node_script.py).
+#
+# Update both this file and the driver script if you recalibrate the IMU,
+# so there's a single canonical record of the values being burned into the
+# device on every boot.
+
+bno055_usb_stick_node:
+  ros__parameters:
+    serial_port: /dev/BNO_Stick     # udev symlink expected
+    frame_id: imu_link
+    publish_rate_hz: 100
+    operating_mode: 0x08            # IMU (accel + gyro, no magnetometer)
+
+    # Unit selection register (0x3B) value written on reset.
+    # 0b00000110 = Android orientation, m/s², rad/s, °C, degrees
+    unit_sel: 0x06
+
+    # Hardware calibration constants written to registers 0x55–0x6A on reset.
+    # These came from a one-time calibration; recalibrate if the IMU is moved
+    # to a different rigid mount on the car.
+    calibration:
+      acc_offset_x: [0xFA, 0xFF]
+      acc_offset_y: [0xFD, 0xFF]
+      acc_offset_z: [0xDF, 0xFF]
+      gyr_offset_x: [0xFF, 0xFF]
+      gyr_offset_y: [0x03, 0x00]
+      gyr_offset_z: [0x00, 0x00]
+      acc_radius:   [0xE8, 0x03]
+      mag_radius:   [0xE0, 0x01]

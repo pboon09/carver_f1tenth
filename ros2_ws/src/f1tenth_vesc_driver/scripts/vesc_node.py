@@ -83,11 +83,19 @@ class VescNode(Node):
 
         self.declare_parameter('serial_port', '/dev/ttyACM0')
         self.declare_parameter('baudrate', 230400)
-        self.declare_parameter('cmd_rate', 50.0)
+        # cmd_rate bumped 50 → 100 Hz: at 230400 baud a write-cmd + write-query
+        # + read-response cycle is ~6 ms, so 100 Hz is comfortable.
+        self.declare_parameter('cmd_rate', 100.0)
+        # How often to ALSO ask the VESC for its telemetry payload (RPM, temps,
+        # currents). Used to be 0.05 s (20 Hz). Bumped to 0.02 s (50 Hz) so
+        # /vesc/state — and downstream /vesc/twist for the EKF — actually has
+        # fresh data, not the same value repeating.
+        self.declare_parameter('query_interval', 0.02)
 
         self.serial_port = self.get_parameter('serial_port').value
         self.baudrate = self.get_parameter('baudrate').value
         cmd_rate = self.get_parameter('cmd_rate').value
+        self.query_interval = float(self.get_parameter('query_interval').value)
 
         self.subscription = self.create_subscription(
             Int32,
@@ -137,9 +145,12 @@ class VescNode(Node):
             payload = struct.pack('>Bi', 8, int(self.cmd_rpm))
             self.ser.write(make_packet(payload))
 
-            if time.time() - self.last_query > 0.05:
+            if time.time() - self.last_query > self.query_interval:
                 self.ser.write(make_packet(bytes([4])))
-                pkt = read_packet(self.ser, timeout=0.05)
+                # Short read timeout — at 230400 baud the ~60-byte reply
+                # comes back in ~3 ms, so 20 ms is plenty and doesn't stall
+                # the next command cycle if the VESC drops a response.
+                pkt = read_packet(self.ser, timeout=0.02)
                 if pkt is not None:
                     values = parse_values(pkt)
                     if values:

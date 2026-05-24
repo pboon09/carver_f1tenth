@@ -18,6 +18,9 @@ def generate_launch_description():
     inverted = LaunchConfiguration('inverted', default='false')
     angle_compensate = LaunchConfiguration('angle_compensate', default='true')
     scan_mode = LaunchConfiguration('scan_mode', default='Standard')
+    # Same 180° rotation fix as rplidar_c1_launch.py — keep the view
+    # launch in sync so RViz shows the arrow direction at +x here too.
+    flip_x_axis = LaunchConfiguration('flip_x_axis', default='true')
 
     rviz_config_dir = os.path.join(
             get_package_share_directory('rplidar_ros'),
@@ -61,6 +64,12 @@ def generate_launch_description():
             default_value=scan_mode,
             description='Specifying scan mode of lidar'),
 
+        DeclareLaunchArgument(
+            'flip_x_axis',
+            default_value=flip_x_axis,
+            description='Rotate scan indices by 180° so the arrow direction '
+                        'lands at +x (set true for this car)'),
+
         Node(
             package='rplidar_ros',
             executable='rplidar_node',
@@ -71,8 +80,8 @@ def generate_launch_description():
                          'frame_id': frame_id,
                          'inverted': inverted,
                          'angle_compensate': angle_compensate,
-                           'scan_mode': scan_mode
-                         }],
+                         'scan_mode': scan_mode,
+                         'flip_x_axis': flip_x_axis}],
             output='screen'),
 
         Node(

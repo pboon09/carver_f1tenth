@@ -13,6 +13,8 @@ find_package(sensor_msgs REQUIRED)
 
 install(PROGRAMS
   scripts/vesc_node.py
+  scripts/vesc_odometry.py
+  scripts/vesc_velocity.py
   scripts/dummy_script.py
   DESTINATION lib/${PROJECT_NAME}
 )

@@ -1,0 +1,113 @@
+slam_toolbox:
+  ros__parameters:
+
+    # ---------- Plugin ----------
+    solver_plugin: solver_plugins::CeresSolver
+    ceres_linear_solver: SPARSE_NORMAL_CHOLESKY
+    ceres_preconditioner: SCHUR_JACOBI
+    ceres_trust_strategy: LEVENBERG_MARQUARDT
+    ceres_dogleg_type: TRADITIONAL_DOGLEG
+    ceres_loss_function: None
+
+    # ---------- Frames (real-car TF tree) ----------
+    odom_frame: odom
+    map_frame: map
+    # slam_toolbox publishes map → odom so that `base_frame` ends up at z=0
+    # in the map. Using `basefootprint` (ground-level link from URDF) keeps
+    # the wheels on the floor instead of sinking them into the occupancy
+    # grid. Switch back to `base_link` only if you also remove the
+    # URDF basefootprint joint and the z=0.1189 lift in mapping.launch.py.
+    base_frame: basefootprint
+
+    # ---------- Topics ----------
+    scan_topic: /scan
+
+    # ---------- Mode ----------
+    mode: mapping              # use 'localization' to load an existing map
+
+    # ---------- Timing ----------
+    # All timings tuned for best MAP quality on a 10 Hz lidar:
+    #   - minimum_time_interval = 1/lidar_rate so every scan is processed.
+    #   - map_update_interval LARGER than minimum_time_interval gives the
+    #     map-rebuild thread breathing room — quality over framerate. The
+    #     occupancy grid doesn't need 50 Hz; human-eye-smooth is 5 Hz.
+    #   - transform_publish_period 20 Hz: plenty smooth for downstream
+    #     consumers (EKF, controllers) without burning CPU.
+    minimum_time_interval: 0.1        # 10 Hz — match lidar rate exactly
+    transform_publish_period: 0.05    # 20 Hz map → odom
+    map_update_interval: 0.2          # 5 Hz occupancy grid rebuild —
+                                      # gives scan-match thread CPU headroom
+    transform_timeout: 0.2
+    tf_buffer_duration: 30.0
+
+    # ---------- Sensor ----------
+    # Full RPLidar C1 indoor range — distant walls are massive yaw anchors
+    # for scan-match. Spotty visual cells at long range don't hurt
+    # localization accuracy; the matcher uses ray endpoints directly.
+    max_laser_range: 12.0
+    # 0.1 m / 0.1 rad — a compromise between 0.05 (too dense, scan-match
+    # can't disambiguate within tiny inter-node motion) and 0.2 (proved
+    # to amplify scan-match jumps in the diagnostic run — 24° single steps).
+    minimum_travel_distance: 0.1
+    minimum_travel_heading: 0.1
+
+    # ---------- Map ----------
+    # 2.5 cm cells — fine-grained enough that scan-match snaps to
+    # sub-cm pose precision. More memory, more CPU per map_update.
+    resolution: 0.025
+    use_map_saver: true
+
+    # ---------- Scan matching ----------
+    use_scan_matching: true
+    use_scan_barycenter: true
+    # 50 scans of buffered context for scan-match. Both helps map density
+    # (more rays per cell) AND localization (stronger local pose graph).
+    scan_buffer_size: 50
+    scan_buffer_maximum_scan_distance: 10.0
+    link_match_minimum_response_fine: 0.1
+    link_scan_maximum_distance: 1.5
+
+    # ---------- Loop closure ----------
+    # Wider search distance — catches loop closures earlier, before
+    # accumulated drift makes them unrecoverable. Stricter response
+    # thresholds for fine matching to avoid false closures.
+    do_loop_closing: true
+    loop_search_maximum_distance: 6.0
+    loop_match_minimum_chain_size: 10
+    loop_match_maximum_variance_coarse: 3.0
+    loop_match_minimum_response_coarse: 0.35
+    loop_match_minimum_response_fine: 0.45
+
+    # ---------- Correlation (scan-matching search grid) ----------
+    # 5 mm xy search resolution + 1 m search window: lets scan-match
+    # zoom in to sub-cm pose precision while still finding the match
+    # when the prior is up to 50 cm off. Smear tightened to 0.05 m.
+    correlation_search_space_dimension: 1.0
+    correlation_search_space_resolution: 0.005
+    correlation_search_space_smear_deviation: 0.05
+
+    # ---------- Loop search space ----------
+    loop_search_space_dimension: 8.0
+    loop_search_space_resolution: 0.05
+    loop_search_space_smear_deviation: 0.03
+
+    # ---------- Scan matcher penalties ----------
+    # Reverted to the previous "working better" config after the 0.3/0.5
+    # + 40° search run produced 24° single-update jumps and 38°/min map
+    # drift. The wider search box let scan-match snap to far-off correlation
+    # peaks in feature-poor moments. Tight penalties + narrow search keep
+    # scan-match honest at the cost of some prior-following during turns.
+    distance_variance_penalty: 0.5
+    angle_variance_penalty: 2.0
+    fine_search_angle_offset: 0.001       # ~0.06 deg — finer zoom
+    coarse_search_angle_offset: 0.349     # ~20 deg
+    coarse_angle_resolution: 0.00873      # ~0.5 deg — half default
+    minimum_angle_penalty: 0.7
+    minimum_distance_penalty: 0.5
+    use_response_expansion: true
+
+    # ---------- Misc ----------
+    debug_logging: true                   # per-scan 'Metric Scores' to log
+    throttle_scans: 1               # process every scan (1 of 1)
+    stack_size_to_use: 40000000
+    enable_interactive_mode: true

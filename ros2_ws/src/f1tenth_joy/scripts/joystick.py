@@ -18,10 +18,22 @@ class JoystickNode(Node):
         self.declare_parameter('max_rpm', 10000)
         self.declare_parameter('max_steering_angle', 0.4189)
         self.declare_parameter('deadzone', 0.1)
+        # Shoulder-button fixed-RPM overrides. While held, publish the
+        # fixed RPM regardless of the left stick — useful for repeatable
+        # crawl-speed forward/reverse during SLAM tuning.
+        # L1 = button 4, L2 = button 6 on PS controllers via Linux joy driver.
+        self.declare_parameter('l1_button_index', 4)
+        self.declare_parameter('l1_rpm', -1200)
+        self.declare_parameter('l2_button_index', 6)
+        self.declare_parameter('l2_rpm', 1200)
 
         self.max_rpm = self.get_parameter('max_rpm').value
         self.max_steering_angle = self.get_parameter('max_steering_angle').value
         self.deadzone = self.get_parameter('deadzone').value
+        self.l1_button_index = self.get_parameter('l1_button_index').value
+        self.l1_rpm = self.get_parameter('l1_rpm').value
+        self.l2_button_index = self.get_parameter('l2_button_index').value
+        self.l2_rpm = self.get_parameter('l2_rpm').value
 
         self.axis_neutral_positions = {
             0: 0.0,
@@ -38,7 +50,10 @@ class JoystickNode(Node):
 
         self.get_logger().info('VESC Joystick Node Started')
         self.get_logger().info(f'Max RPM: {self.max_rpm}, Max Steering: {self.max_steering_angle:.4f} rad')
-        self.get_logger().info('Control: Left stick Y=RPM, Right stick X=Steering')
+        self.get_logger().info(
+            f'Control: Left stick Y=RPM, Right stick X=Steering, '
+            f'L1(btn{self.l1_button_index})={self.l1_rpm} RPM, '
+            f'L2(btn{self.l2_button_index})={self.l2_rpm} RPM')
 
     def joy_callback(self, msg):
         """Process joystick input"""
@@ -78,8 +93,20 @@ class JoystickNode(Node):
         left_stick_y = self.apply_axis_deadzone(1, self.current_joy.axes[1]) * -1.0
         right_stick_x = self.apply_axis_deadzone(3, self.current_joy.axes[3])
 
-        rpm_cmd.data = int(left_stick_y * self.max_rpm)
-        steering_cmd.data = right_stick_x * self.max_steering_angle
+        # L1/L2 held → fixed RPM override. L1 takes precedence if both pressed.
+        btns = self.current_joy.buttons
+        l1_pressed = len(btns) > self.l1_button_index and btns[self.l1_button_index] == 1
+        l2_pressed = len(btns) > self.l2_button_index and btns[self.l2_button_index] == 1
+        if l1_pressed:
+            rpm_cmd.data = int(self.l1_rpm)
+        elif l2_pressed:
+            rpm_cmd.data = int(self.l2_rpm)
+        else:
+            rpm_cmd.data = int(left_stick_y * self.max_rpm)
+        # Negated — joystick axis convention has left = negative, but the
+        # STM32 servo treats negative as a right turn. This inversion makes
+        # pushing the stick LEFT actually steer the car LEFT.
+        steering_cmd.data = -right_stick_x * self.max_steering_angle
 
         self.vesc_cmd_publisher.publish(rpm_cmd)
         self.steering_publisher.publish(steering_cmd)

@@ -1,0 +1,148 @@
+# robot_localization EKF — IMU-only odometry propagation.
+#
+# Architecture:
+#   /imu/data (100 Hz, BNO055 in IMU mode 0x08) ──► ekf_filter_node ──► /odometry/filtered (100 Hz)
+#                                                          │           ──► TF odom → base_link (100 Hz)
+#                                                          ▼
+#                                                  slam_toolbox uses
+#                                                  this as motion prior
+#                                                  /scan @ 10 Hz scan-matches
+#                                                  ──► TF map → odom (corrects drift)
+#
+# Net: localization (map → base_link) updates at 100 Hz; the 10 Hz scan
+# correction nudges the EKF's drift back onto the map.
+#
+# Noise/covariance values below are tuned based on published BNO055 specs
+# (datasheet BST-BNO055-DS000, Bosch Sensortec):
+#   - Gyroscope:   noise density ≈ 0.014 °/s/√Hz (0.000244 rad/s/√Hz)
+#                  zero-rate offset ≈ ±1 °/s after calibration
+#   - Accelerometer (±4g): noise density ≈ 190 µg/√Hz (0.0019 m/s²/√Hz)
+#                          zero-g offset ≈ ±80 mg
+#   - IMU-mode fusion: yaw drift ≈ 1°/min without magnetometer; ODR 100 Hz
+#
+# These translate (at 100 Hz sample rate) to:
+#   gyro     1σ ≈ 0.0024 rad/s     → variance ≈ 6e-6   (rad/s)²
+#   accel    1σ ≈ 0.019  m/s²      → variance ≈ 3.6e-4 (m/s²)²
+#   yaw      1σ ≈ 0.087  rad (5°)  → variance ≈ 7.6e-3 rad²  (drifts over time)
+#
+# RPLidar C1 (datasheet from slamtec.com/en/c1):
+#   - Range:           0.05 – 12 m (70 % reflectivity); 6 m at 10 % reflectivity
+#   - Distance accuracy: ±30 mm (DTOF)
+#   - Sample rate:     5 kHz at 10 Hz scan → angular resolution 0.72°
+# slam_toolbox params (in slam_toolbox_params.yaml) already use 12 m max range.
+
+ekf_filter_node:
+  ros__parameters:
+    # ---- timing ----
+    frequency: 100.0
+    sensor_timeout: 0.1
+    two_d_mode: true
+    publish_tf: true
+    publish_acceleration: false
+    transform_time_offset: 0.0
+    transform_timeout: 0.0
+    print_diagnostics: false
+    debug: false
+
+    # ---- frames ----
+    # EKF publishes  world_frame → base_link_frame  each cycle.
+    # We target `basefootprint` (the ground-level link) so this matches
+    # slam_toolbox's base_frame: basefootprint, and the URDF is rooted
+    # at basefootprint per REP-105.
+    map_frame: map
+    odom_frame: odom
+    base_link_frame: basefootprint
+    world_frame: odom
+
+    # ---- IMU input ----
+    # /imu_filter is published by imu_filter (f1tenth_joy) — the single
+    # canonical IMU pipeline: bias subtraction, horizontal projection (so
+    # angular_velocity.z is true yaw rate regardless of dynamic suspension
+    # tilt), low-pass on gyro Z, and measured noise in the covariance.
+    imu0: /imu_filter
+    # 15-state mask: [ x  y  z  roll pitch yaw  vx vy vz  vroll vpitch vyaw  ax ay az ]
+    # Yaw RATE (gyro Z) ONLY.
+    # Why nothing else:
+    #   - absolute yaw (slot 5): BNO055 fused yaw drifts ~1°/min in IMU mode
+    #     (no magnetometer). Letting it set absolute heading creates a fight
+    #     with slam_toolbox's scan-derived yaw → smeared map (observed).
+    #   - ax (slot 12): LIA noise on this BNO055 was ~700× datasheet spec.
+    #     Integrating twice = visible position jitter when stationary (observed).
+    #   - everything else is either pinned by two_d_mode or not measurable.
+    # Yaw rate only — BNO055 absolute yaw drifts ~3°/s on this unit (much
+    # worse than spec), measured to be far worse than the bare gyro Z.
+    # Gyro Z is post-bias-subtraction AND online bias-refreshed by the
+    # calibrator whenever the robot is detected stationary.
+    imu0_config: [false, false, false,
+                  false, false, false,
+                  false, false, false,
+                  false, false, true,
+                  false, false, false]
+    imu0_differential: false
+    imu0_relative: true            # start at yaw=0 regardless of physical heading
+    imu0_queue_size: 10
+    imu0_remove_gravitational_acceleration: false   # BNO055 already removed (LIA register)
+    imu0_nodelay: false
+
+    # ---- VESC wheel velocity (vx only, LOOSE trust) ----
+    # vesc_velocity.py publishes /vesc/twist with vx derived from motor RPM.
+    # Covariance on vx is set in vesc_velocity.py via the `vx_covariance`
+    # param (currently 10.0 m²/s² — see mapping.launch.py). With that 1σ ≈
+    # 3 m/s of uncertainty, the EKF only weakly trusts wheel velocity — slip
+    # events get washed out by the SLAM scan-match correction at 10 Hz, while
+    # grip-driving gives the EKF a real 100 Hz xy motion prior that helps
+    # slam_toolbox's scan match converge during fast turns.
+    twist0: /vesc/twist
+    twist0_config: [false, false, false,
+                    false, false, false,
+                    true,  false, false,
+                    false, false, false,
+                    false, false, false]
+    twist0_differential: false
+    twist0_relative: false
+    twist0_queue_size: 10
+    twist0_nodelay: false
+
+    # ---- process noise (model uncertainty per second) ----
+    # 15×15 diagonal. Trust the BNO055 a lot for yaw-rate and accel (low values),
+    # less for absolute position (it has to be filled in by scan correction).
+    # IMPORTANT: every entry must be a float (0.0 not 0) — ROS2's strict YAML
+    # parser rejects sequences that mix int and float.
+    process_noise_covariance: [
+      0.05, 0.0,  0.0,  0.0,  0.0,  0.0,  0.0,  0.0,  0.0,  0.0,    0.0,    0.0,    0.0,    0.0,    0.0,
+      0.0,  0.05, 0.0,  0.0,  0.0,  0.0,  0.0,  0.0,  0.0,  0.0,    0.0,    0.0,    0.0,    0.0,    0.0,
+      0.0,  0.0,  0.06, 0.0,  0.0,  0.0,  0.0,  0.0,  0.0,  0.0,    0.0,    0.0,    0.0,    0.0,    0.0,
+      0.0,  0.0,  0.0,  0.03, 0.0,  0.0,  0.0,  0.0,  0.0,  0.0,    0.0,    0.0,    0.0,    0.0,    0.0,
+      0.0,  0.0,  0.0,  0.0,  0.03, 0.0,  0.0,  0.0,  0.0,  0.0,    0.0,    0.0,    0.0,    0.0,    0.0,
+      0.0,  0.0,  0.0,  0.0,  0.0,  0.06, 0.0,  0.0,  0.0,  0.0,    0.0,    0.0,    0.0,    0.0,    0.0,
+      0.0,  0.0,  0.0,  0.0,  0.0,  0.0,  0.025,0.0,  0.0,  0.0,    0.0,    0.0,    0.0,    0.0,    0.0,
+      0.0,  0.0,  0.0,  0.0,  0.0,  0.0,  0.0,  0.025,0.0,  0.0,    0.0,    0.0,    0.0,    0.0,    0.0,
+      0.0,  0.0,  0.0,  0.0,  0.0,  0.0,  0.0,  0.0,  0.04, 0.0,    0.0,    0.0,    0.0,    0.0,    0.0,
+      0.0,  0.0,  0.0,  0.0,  0.0,  0.0,  0.0,  0.0,  0.0,  0.01,   0.0,    0.0,    0.0,    0.0,    0.0,
+      0.0,  0.0,  0.0,  0.0,  0.0,  0.0,  0.0,  0.0,  0.0,  0.0,    0.01,   0.0,    0.0,    0.0,    0.0,
+      0.0,  0.0,  0.0,  0.0,  0.0,  0.0,  0.0,  0.0,  0.0,  0.0,    0.0,    0.02,   0.0,    0.0,    0.0,
+      0.0,  0.0,  0.0,  0.0,  0.0,  0.0,  0.0,  0.0,  0.0,  0.0,    0.0,    0.0,    0.01,   0.0,    0.0,
+      0.0,  0.0,  0.0,  0.0,  0.0,  0.0,  0.0,  0.0,  0.0,  0.0,    0.0,    0.0,    0.0,    0.01,   0.0,
+      0.0,  0.0,  0.0,  0.0,  0.0,  0.0,  0.0,  0.0,  0.0,  0.0,    0.0,    0.0,    0.0,    0.0,    0.015
+    ]
+
+    # ---- initial estimate covariance (how unsure we are at t=0) ----
+    # Small for everything because we declare we start at the origin with no
+    # motion — scan-match correction will lift covariance on its own.
+    initial_estimate_covariance: [
+      1.0e-9, 0.0,    0.0,    0.0,    0.0,    0.0,    0.0,    0.0,    0.0,    0.0,    0.0,    0.0,    0.0,    0.0,    0.0,
+      0.0,    1.0e-9, 0.0,    0.0,    0.0,    0.0,    0.0,    0.0,    0.0,    0.0,    0.0,    0.0,    0.0,    0.0,    0.0,
+      0.0,    0.0,    1.0e-9, 0.0,    0.0,    0.0,    0.0,    0.0,    0.0,    0.0,    0.0,    0.0,    0.0,    0.0,    0.0,
+      0.0,    0.0,    0.0,    1.0e-9, 0.0,    0.0,    0.0,    0.0,    0.0,    0.0,    0.0,    0.0,    0.0,    0.0,    0.0,
+      0.0,    0.0,    0.0,    0.0,    1.0e-9, 0.0,    0.0,    0.0,    0.0,    0.0,    0.0,    0.0,    0.0,    0.0,    0.0,
+      0.0,    0.0,    0.0,    0.0,    0.0,    1.0e-9, 0.0,    0.0,    0.0,    0.0,    0.0,    0.0,    0.0,    0.0,    0.0,
+      0.0,    0.0,    0.0,    0.0,    0.0,    0.0,    1.0e-9, 0.0,    0.0,    0.0,    0.0,    0.0,    0.0,    0.0,    0.0,
+      0.0,    0.0,    0.0,    0.0,    0.0,    0.0,    0.0,    1.0e-9, 0.0,    0.0,    0.0,    0.0,    0.0,    0.0,    0.0,
+      0.0,    0.0,    0.0,    0.0,    0.0,    0.0,    0.0,    0.0,    1.0e-9, 0.0,    0.0,    0.0,    0.0,    0.0,    0.0,
+      0.0,    0.0,    0.0,    0.0,    0.0,    0.0,    0.0,    0.0,    0.0,    1.0e-9, 0.0,    0.0,    0.0,    0.0,    0.0,
+      0.0,    0.0,    0.0,    0.0,    0.0,    0.0,    0.0,    0.0,    0.0,    0.0,    1.0e-9, 0.0,    0.0,    0.0,    0.0,
+      0.0,    0.0,    0.0,    0.0,    0.0,    0.0,    0.0,    0.0,    0.0,    0.0,    0.0,    1.0e-9, 0.0,    0.0,    0.0,
+      0.0,    0.0,    0.0,    0.0,    0.0,    0.0,    0.0,    0.0,    0.0,    0.0,    0.0,    0.0,    1.0e-9, 0.0,    0.0,
+      0.0,    0.0,    0.0,    0.0,    0.0,    0.0,    0.0,    0.0,    0.0,    0.0,    0.0,    0.0,    0.0,    1.0e-9, 0.0,
+      0.0,    0.0,    0.0,    0.0,    0.0,    0.0,    0.0,    0.0,    0.0,    0.0,    0.0,    0.0,    0.0,    0.0,    1.0e-9
+    ]

@@ -175,16 +175,21 @@ class BNO055USBSTICKNode(Node):
         
         sleep(0.2)
            
-        # Set to IMU mode (accelerometer + gyroscope, no magnetometer)
-        self.get_logger().info("Setting IMU mode...")
-        imu_mode = 0b00001000
+        # IMU mode 0x08 — accel + gyro fusion, NO magnetometer. Reverted
+        # from NDOF (0x0C) because without doing a figure-8 mag-calibration
+        # dance the fused yaw drifts and feeds bad rotation into our
+        # downstream horizontal projection. IMU mode's yaw drifts ~slow
+        # enough that SLAM scan-match handles it; on this car that gave
+        # ~8 °/min stationary drift (vs ~37 °/min with uncalibrated NDOF).
+        self.get_logger().info("Setting IMU mode (accel + gyro, no magnetometer)...")
+        imu_mode = 0b00001000   # 0x08
         self.safe_write_register(opr_mode_addr, imu_mode)
         sleep(0.2)
-        
+
         # Verify final mode
         mode = self.safe_read_register(opr_mode_addr)
         self.get_logger().info(f"Final IMU mode: 0x{mode:02X} ({mode:08b})")
-        
+
         if mode != imu_mode:
             self.get_logger().warn(f"Mode mismatch! Expected 0x{imu_mode:02X}, got 0x{mode:02X}")
         

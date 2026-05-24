@@ -8,6 +8,7 @@ import rclpy
 from rclpy.node import Node
 from sensor_msgs.msg import LaserScan
 from ackermann_msgs.msg import AckermannDriveStamped
+from rclpy.qos import qos_profile_sensor_data
 
 
 class GapFollow(Node):
@@ -16,8 +17,8 @@ class GapFollow(Node):
 
         self.declare_parameter("scan_topic", "/scan")
         self.declare_parameter("drive_topic", "/drive")
-        self.declare_parameter("min_speed", 0.5)
-        self.declare_parameter("max_speed", 0.7)
+        self.declare_parameter("min_speed", 0.3)
+        self.declare_parameter("max_speed", 0.5)
         self.declare_parameter("max_steering_angle", 0.4189)
         self.declare_parameter("steering_smoothing", 0.65)
         self.declare_parameter("car_width", 0.33)
@@ -35,7 +36,7 @@ class GapFollow(Node):
         self.obstacle_inflated = int(self.get_parameter("obstacle_inflated").value)
 
         self.scan_sub = self.create_subscription(
-            LaserScan, self.scan_topic, self.scan_callback, 10
+            LaserScan, self.scan_topic, self.scan_callback, qos_profile_sensor_data
         )
         self.drive_pub = self.create_publisher(
             AckermannDriveStamped, self.drive_topic, 10
@@ -44,6 +45,10 @@ class GapFollow(Node):
         self.previous_steering = 0.0
         self.fov_min = -90
         self.fov_max = 90
+
+        self.declare_parameter("log_every_n", 10)
+        self.log_every_n = max(1, int(self.get_parameter("log_every_n").value))
+        self._scan_count = 0
 
         # shutdown hook
         signal.signal(signal.SIGINT, self._shutdown_handler)
@@ -166,33 +171,42 @@ class GapFollow(Node):
         obstacle_idxs = np.where((processed_ranges > 0) & (processed_ranges <= self.min_distance_threshold))[0]
         num_obstacles = len(obstacle_idxs)
 
-        total_zeroed = 0
-        bubble_sizes = []
+        n = len(processed_ranges)
+        if num_obstacles > 0:
+            obs_dist = ranges[obstacle_idxs]
 
-        for obs_idx in obstacle_idxs:
-            distance_to_object = ranges[obs_idx]
+            # Per-obstacle bubble radius (metres). Mirrors create_bubble_radius:
+            #   d < 1.0 → 1.1·w,  d < 2.0 → 1.0·w,  else → 0.9·w
+            bubble_m = np.where(obs_dist < 1.0, self.car_width * 1.1,
+                       np.where(obs_dist < 2.0, self.car_width * 1.0,
+                                                self.car_width * 0.9))
 
-            if distance_to_object > 0.1:
-                bubble_radius = self.create_bubble_radius(distance_to_object)
-                arc_length_from_car = distance_to_object * msg.angle_increment
-                angular_bubble = int(bubble_radius / arc_length_from_car)
-                inflation_size = min(angular_bubble, 60)
-            else:
-                inflation_size = 60
+            # Convert metres → index half-width via arc length. For d ≤ 0.1 m
+            # the original code forced inflation_size = 60.
+            safe_dist = np.maximum(obs_dist, 1e-6)
+            arc_len = safe_dist * msg.angle_increment
+            inflation = np.where(obs_dist > 0.1,
+                                 (bubble_m / arc_len).astype(np.int32),
+                                 60)
+            inflation = np.minimum(inflation, 60)
 
-            bubble_sizes.append(inflation_size)
+            # Boolean mask of every index inside any obstacle's bubble.
+            kill = np.zeros(n, dtype=bool)
+            for obs_idx, infl in zip(obstacle_idxs, inflation):
+                lo = max(fov_min_idx, obs_idx - int(infl))
+                hi = min(fov_max_idx, obs_idx + int(infl))
+                if lo <= hi:
+                    kill[lo:hi + 1] = True
 
-            for offset_idx in range(-inflation_size, inflation_size + 1):
-                idx = obs_idx + offset_idx
-                if fov_min_idx <= idx <= fov_max_idx:
-                    if processed_ranges[idx] != 0:
-                        processed_ranges[idx] = 0
-                        total_zeroed += 1
+            total_zeroed = int(np.count_nonzero(kill & (processed_ranges != 0)))
+            processed_ranges[kill] = 0
+            bubble_sizes = inflation.tolist()
+        else:
+            total_zeroed = 0
+            bubble_sizes = []
 
-        valid_after_bubble = np.sum(
-            (processed_ranges[fov_min_idx:fov_max_idx+1] > 0) &
-            (processed_ranges[fov_min_idx:fov_max_idx+1] != float('inf'))
-        )
+        fov_slice = processed_ranges[fov_min_idx:fov_max_idx + 1]
+        valid_after_bubble = int(np.sum((fov_slice > 0) & (fov_slice != float('inf'))))
 
         # gap finding
         process_idx = fov_min_idx
@@ -257,50 +271,49 @@ class GapFollow(Node):
         speed = self.linear_velocity_controller(delta_distance, heading_direction)
         steering_angle = self.steering_controller(heading_direction, speed)
 
-        # main log 
-        self.get_logger().info(
-            f"[SCAN ] total={total_points} | valid={valid_raw} | FOV_pts={fov_points}"
-        )
-        self.get_logger().info(
-            f"[BUBBL] obstacles={num_obstacles} | "
-            f"avg_bubble={int(np.mean(bubble_sizes)) if bubble_sizes else 0} idx | "
-            f"zeroed={total_zeroed} pts | "
-            f"remaining={valid_after_bubble} pts"
-        )
-        if bubble_sizes:
+        self._scan_count += 1
+        if self._scan_count % self.log_every_n == 0:
             self.get_logger().info(
-                f"[BUBBL] sizes min={min(bubble_sizes)} max={max(bubble_sizes)} "
-                f"(cap=60)"
+                f"[SCAN ] total={total_points} | valid={valid_raw} | FOV_pts={fov_points}"
+            )
+            self.get_logger().info(
+                f"[BUBBL] obstacles={num_obstacles} | "
+                f"avg_bubble={int(np.mean(bubble_sizes)) if bubble_sizes else 0} idx | "
+                f"zeroed={total_zeroed} pts | "
+                f"remaining={valid_after_bubble} pts"
+            )
+            if bubble_sizes:
+                self.get_logger().info(
+                    f"[BUBBL] sizes min={min(bubble_sizes)} max={max(bubble_sizes)} "
+                    f"(cap=60)"
+                )
+
+            self.get_logger().info(
+                f"[GAP  ] found={num_gaps} gaps | "
+                f"best: {best_gap_width} idx wide | "
+                f"~{best_gap_physical_width:.2f}m wide | "
+                f"avg_dist={best_gap_distance:.2f}m | "
+                f"score={safest_score:.3f}"
+            )
+            if len(all_gaps) > 1:
+                sorted_gaps = sorted(all_gaps, key=lambda g: g["score"], reverse=True)
+                runner = sorted_gaps[1]
+                self.get_logger().info(
+                    f"[GAP  ] runner-up: {runner['width_idx']} idx | "
+                    f"~{runner['width_m']:.2f}m | score={runner['score']:.3f}"
+                )
+
+            self.get_logger().info(
+                f"[HEAD ] heading={np.degrees(heading_direction):+.1f} deg | "
+                f"clearance={delta_distance:.2f}m"
+            )
+            self.get_logger().info(
+                f"[DRIVE] speed={speed:.3f} m/s | "
+                f"steer_raw={np.degrees(heading_direction):+.1f} deg | "
+                f"steer_smoothed={np.degrees(steering_angle):+.1f} deg | "
+                f"prev_steer={np.degrees(self.previous_steering):+.1f} deg"
             )
 
-        self.get_logger().info(
-            f"[GAP  ] found={num_gaps} gaps | "
-            f"best: {best_gap_width} idx wide | "
-            f"~{best_gap_physical_width:.2f}m wide | "
-            f"avg_dist={best_gap_distance:.2f}m | "
-            f"score={safest_score:.3f}"
-        )
-        if len(all_gaps) > 1:
-            # show runner-up so you can see if scoring is picking correctly
-            sorted_gaps = sorted(all_gaps, key=lambda g: g["score"], reverse=True)
-            runner = sorted_gaps[1]
-            self.get_logger().info(
-                f"[GAP  ] runner-up: {runner['width_idx']} idx | "
-                f"~{runner['width_m']:.2f}m | score={runner['score']:.3f}"
-            )
-
-        self.get_logger().info(
-            f"[HEAD ] heading={np.degrees(heading_direction):+.1f} deg | "
-            f"clearance={delta_distance:.2f}m"
-        )
-        self.get_logger().info(
-            f"[DRIVE] speed={speed:.3f} m/s | "
-            f"steer_raw={np.degrees(heading_direction):+.1f} deg | "
-            f"steer_smoothed={np.degrees(steering_angle):+.1f} deg | "
-            f"prev_steer={np.degrees(self.previous_steering):+.1f} deg"
-        )
-
-        # warn if gap is narrower than car
         if num_gaps > 0 and best_gap_physical_width < self.car_width:
             self.get_logger().warn(
                 f"[WARN ] Best gap ({best_gap_physical_width:.2f}m) is NARROWER than car ({self.car_width}m)!"

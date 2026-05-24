@@ -30,6 +30,9 @@ install(PROGRAMS
   scripts/dummy_script.py
   scripts/teleop.py
   scripts/joystick.py
+  scripts/cmd_to_joint_state.py
+  scripts/imu_calibrator.py
+  scripts/imu_filter.py
   DESTINATION lib/${PROJECT_NAME}
 )
 
