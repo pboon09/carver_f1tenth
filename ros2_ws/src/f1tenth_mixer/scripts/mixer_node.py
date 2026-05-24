@@ -31,7 +31,7 @@ class MixerNode(Node):
         
         speed = msg.drive.speed
         steering_angle = max(min(msg.drive.steering_angle, self.max_steering_angle), -self.max_steering_angle) * -1.0
-        rpm_command = min(max(int(60.0 * speed * 29.75 / (2.0 * np.pi * self.wheel_radius)), -self.max_rpm), self.max_rpm) * -1
+        rpm_command = min(max(int(60.0 * speed * 29.75 / (2.0 * np.pi * self.wheel_radius)), -self.max_rpm), self.max_rpm)
         
         self.vesc_cmd_publisher.publish(Int32(data=rpm_command))
         self.steering_publisher.publish(Float32(data=steering_angle))

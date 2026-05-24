@@ -90,7 +90,7 @@ class JoystickNode(Node):
             self.steering_publisher.publish(steering_cmd)
             return
 
-        left_stick_y = self.apply_axis_deadzone(1, self.current_joy.axes[1]) * -1.0
+        left_stick_y = self.apply_axis_deadzone(1, self.current_joy.axes[1])
         right_stick_x = self.apply_axis_deadzone(3, self.current_joy.axes[3])
 
         # L1/L2 held → fixed RPM override. L1 takes precedence if both pressed.

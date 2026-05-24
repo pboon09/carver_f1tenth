@@ -71,7 +71,7 @@ def parse_values(payload):
         'i_motor': struct.unpack('>i', payload[5:9])[0] / 100.0,
         'i_in': struct.unpack('>i', payload[9:13])[0] / 100.0,
         'duty': struct.unpack('>h', payload[21:23])[0] / 1000.0,
-        'rpm': struct.unpack('>i', payload[23:27])[0],
+        'rpm': -struct.unpack('>i', payload[23:27])[0],
         'v_in': struct.unpack('>h', payload[27:29])[0] / 10.0,
         'fault': payload[53],
     }
@@ -142,7 +142,7 @@ class VescNode(Node):
             return
 
         try:
-            payload = struct.pack('>Bi', 8, int(self.cmd_rpm))
+            payload = struct.pack('>Bi', 8, int(-self.cmd_rpm))
             self.ser.write(make_packet(payload))
 
             if time.time() - self.last_query > self.query_interval:

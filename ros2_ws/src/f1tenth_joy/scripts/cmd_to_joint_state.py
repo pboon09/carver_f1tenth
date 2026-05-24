@@ -76,11 +76,7 @@ class CmdToJointState(Node):
         dt = now - self.last_time
         self.last_time = now
 
-        # motor RPM -> wheel rad/s, integrate to running angle.
-        # Negated because the URDF's wheel joint Z axis points opposite the
-        # direction of travel — without this, pushing throttle forward made
-        # the visual wheels spin backward.
-        wheel_omega = -(self.current_rpm / self.gear_ratio) * 2.0 * math.pi / 60.0
+        wheel_omega = (self.current_rpm / self.gear_ratio) * 2.0 * math.pi / 60.0
         self.wheel_angle += wheel_omega * dt
         # keep the accumulator bounded so it doesn't grow forever
         self.wheel_angle = math.fmod(self.wheel_angle, 2.0 * math.pi)
