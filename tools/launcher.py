@@ -63,15 +63,21 @@ def chain(*parts: str) -> str:
 
 # (name, color, bash command)
 LAUNCHES = [
-    ("base launch",    "#1f6feb",
+    ("slam base",      "#1f6feb",
         chain(ROS_SETUP, SENSOR_WS, ROS2_WS, SLAM_WS,
-              "ros2 launch f1tenth_bringup base.launch.py")),
+              "ros2 launch f1tenth_bringup base_slam.launch.py")),
+    ("loc base",       "#0969da",
+        chain(ROS_SETUP, SENSOR_WS, ROS2_WS, SLAM_WS,
+              "ros2 launch f1tenth_bringup base_loc.launch.py")),
     ("sensor launch",  "#0a3069",
         chain(ROS_SETUP, SENSOR_WS, ROS2_WS,
               "ros2 launch f1tenth_bringup sensor.launch.py")),
     ("slam launch",    "#1a7f37",
         chain(ROS_SETUP, SENSOR_WS, ROS2_WS, SLAM_WS,
               "ros2 launch f1tenth_slam mapping.launch.py")),
+    ("loc launch",     "#218bff",
+        chain(ROS_SETUP, SENSOR_WS, ROS2_WS, SLAM_WS,
+              "ros2 launch f1tenth_slam localization.launch.py")),
     ("rplidar launch", "#bf8700",
         chain(ROS_SETUP, SENSOR_WS,
               "ros2 launch rplidar_ros rplidar_c1_launch.py")),
@@ -110,10 +116,13 @@ WORKSPACES = [
 # "running via <parent>" shadow markers and the conflict warning when you
 # try to start a parent whose child is already running on its own.
 CONTAINS: dict[str, list[str]] = {
-    "base launch":   ["slam launch", "sensor launch", "rplidar launch",
-                      "imu launch", "uros launch"],
+    "slam base":     ["slam launch", "loc launch", "sensor launch",
+                      "rplidar launch", "imu launch", "uros launch", "loc base"],
+    "loc base":      ["loc launch", "slam launch", "sensor launch",
+                      "rplidar launch", "imu launch", "uros launch", "slam base"],
     "sensor launch": ["rplidar launch", "imu launch"],
     "slam launch":   ["sensor launch", "rplidar launch", "imu launch"],
+    "loc launch":    ["sensor launch", "rplidar launch", "imu launch"],
 }
 
 # `pkill -9 -f <pattern>` patterns to fire after SIGKILLing the process group,
@@ -121,7 +130,18 @@ CONTAINS: dict[str, list[str]] = {
 # someone started by hand) still goes away. Patterns match the *full command
 # line* — keep them specific enough to not nuke unrelated processes.
 KILL_PATTERNS: dict[str, list[str]] = {
-    "base launch":     ["base\\.launch\\.py", "mapping\\.launch\\.py",
+    "slam base":       ["base_slam\\.launch\\.py", "base_loc\\.launch\\.py",
+                        "mapping\\.launch\\.py", "localization\\.launch\\.py",
+                        "rplidar_node", "bno055_usb_stick",
+                        "slam_toolbox", "static_transform_publisher",
+                        "robot_state_publisher", "joint_state_publisher",
+                        "cmd_to_joint_state\\.py", "imu_calibrator\\.py",
+                        "imu_filter\\.py",
+                        "vesc_velocity\\.py", "ekf_node",
+                        "vesc_node\\.py", "micro_ros_agent",
+                        "rviz2 .*f1tenth_slam.*slam\\.rviz"],
+    "loc base":        ["base_slam\\.launch\\.py", "base_loc\\.launch\\.py",
+                        "mapping\\.launch\\.py", "localization\\.launch\\.py",
                         "rplidar_node", "bno055_usb_stick",
                         "slam_toolbox", "static_transform_publisher",
                         "robot_state_publisher", "joint_state_publisher",
@@ -132,6 +152,12 @@ KILL_PATTERNS: dict[str, list[str]] = {
                         "rviz2 .*f1tenth_slam.*slam\\.rviz"],
     "sensor launch":   ["sensor\\.launch\\.py", "rplidar_node", "bno055_usb_stick"],
     "slam launch":     ["mapping\\.launch\\.py", "rplidar_node", "bno055_usb_stick",
+                        "slam_toolbox", "static_transform_publisher",
+                        "cmd_to_joint_state\\.py", "imu_calibrator\\.py",
+                        "imu_filter\\.py",
+                        "robot_state_publisher", "ekf_node",
+                        "rviz2 .*f1tenth_slam.*slam\\.rviz"],
+    "loc launch":      ["localization\\.launch\\.py", "rplidar_node", "bno055_usb_stick",
                         "slam_toolbox", "static_transform_publisher",
                         "cmd_to_joint_state\\.py", "imu_calibrator\\.py",
                         "imu_filter\\.py",
@@ -153,7 +179,7 @@ ORPHAN_PATTERNS = [
     "ros2 launch f1tenth", "ros2 launch rplidar",
     "ros2 run bno055_usb_stick", "ros2 run micro_ros_agent",
     "rplidar_node", "bno055_usb_stick", "vesc_node\\.py", "micro_ros_agent",
-    "async_slam_toolbox_node", "slam_toolbox",
+    "async_slam_toolbox_node", "localization_slam_toolbox_node", "slam_toolbox",
     "static_transform_publisher",
     "robot_state_publisher", "joint_state_publisher_gui",
     "joy_node", "f1tenth_joy",
