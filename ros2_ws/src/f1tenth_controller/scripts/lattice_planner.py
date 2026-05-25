@@ -26,8 +26,10 @@ import rclpy
 import yaml
 from ackermann_msgs.msg import AckermannDriveStamped
 from ament_index_python.packages import get_package_share_directory
+from geometry_msgs.msg import PoseWithCovarianceStamped
 from nav_msgs.msg import Odometry
 from rclpy.node import Node
+from rclpy.qos import qos_profile_sensor_data
 from sensor_msgs.msg import LaserScan
 from visualization_msgs.msg import Marker, MarkerArray
 
@@ -38,32 +40,102 @@ class LatticePlanner(Node):
         super().__init__("lattice_planner")
 
         # ── Parameters ───────────────────────────────────────────────────────
+        # ── F1TENTH mechanical limits (match gap_follow.py / pure_pursuit.py
+        # so all three controllers share one source of truth for the robot).
+        # car_width:           0.33 m  — physical track width of the car
+        # wheelbase:           0.30 m  — distance between front & rear axles
+        # max_steering_angle:  0.4189 rad (24°) — steering rack mechanical limit
+        self.declare_parameter("car_width",             0.33)
+        self.declare_parameter("wheelbase",             0.30)
+
         # Physical / track
         self.declare_parameter("waypoints_path",        "")
-        self.declare_parameter("max_offset",            1.0)   # m — max lateral shift
-        self.declare_parameter("safety_radius",         0.50)  # car half-width + buffer (merged clearance_margin)
-        self.declare_parameter("track_half_width",      0.70)  # m — obs vs wall split
+        # On-car defaults — /dedicate_odom is the pose stream in the map
+        # frame from trajectory_publisher (slam_toolbox + EKF). /odometry/filtered
+        # is the EKF state for the speed signal (since /dedicate_odom has
+        # zero twist). For the gym sim, override to /ego_racecar/odom and
+        # leave twist_topic empty so twist comes from the same message.
+        self.declare_parameter("odom_topic",   "/dedicate_odom")
+        self.declare_parameter("twist_topic",  "/odometry/filtered")
+        # Safety clamp on commanded speed (applied after the path + obstacle
+        # taper). max_speed=0.3 is a slow-and-safe crawl while tuning; raise
+        # once obstacle avoidance behaves on real-world scans.
+        self.declare_parameter("min_speed",    0.0)
+        self.declare_parameter("max_speed",    0.3)
+        # Max lateral shift from raceline for candidate paths. Geometric
+        # ceiling = corridor half-width − car half-width − safety_buffer.
+        # Beam: 0.50 − 0.165 − 0.05 ≈ 0.28 m. Use 0.27 m to leave 1 cm of
+        # geometric margin; candidates touching walls get rejected by the
+        # wall_clr penalty anyway. On wider tracks (Spielberg, ~3 m) raise
+        # to ~1.0.
+        self.declare_parameter("max_offset",            0.27)
+        # Extra clearance beyond the car's physical edge. The effective
+        # safety_radius used by collision checks is car_width/2 + safety_buffer.
+        # 0.34 m worked on wide sim tracks but is impossible inside a 0.5 m
+        # half-corridor — set it to a small physical margin (5 cm) here.
+        self.declare_parameter("safety_buffer",         0.05)
+        # Lidar returns within this distance of the raceline are classified
+        # as on-track OBSTACLES; further returns are walls. Must be SMALLER
+        # than the corridor half-width or every wall return becomes an
+        # obstacle and the planner brakes constantly. Beam corridor
+        # half-width ≈ 0.5 m → 0.25 leaves ~0.25 m gap to wall classification.
+        self.declare_parameter("track_half_width",      0.25)
         # Planning
         self.declare_parameter("plan_horizon",          2.5)   # m ahead
-        self.declare_parameter("num_offsets",           11)
+        self.declare_parameter("num_offsets",           11)    # ~5 cm resolution over ±0.27 m
         # Scoring (deviation & continuity are the useful knobs; smooth/clearance hardcoded)
         self.declare_parameter("w_deviation",           1.0)   # prefer staying near raceline
         self.declare_parameter("w_continuity",          1.5)   # penalise offset changes
         # Pure pursuit
-        self.declare_parameter("min_lookahead",         0.5)
-        self.declare_parameter("max_lookahead",         1.8)
+        self.declare_parameter("min_lookahead",         0.6)
+        self.declare_parameter("max_lookahead",         1.5)
         self.declare_parameter("speed_gain",            0.35)
+        # Bicycle-model responsiveness multiplier — see _pure_pursuit() below.
+        # 1.0 = physical truth (steer = atan(wheelbase × κ), maxes out at 21°
+        # on this map's κ=1.3 rad/m corner — just inside the 24° limit).
+        # Higher values saturate the steering ("bang-bang") through corners.
+        # 1.2 gives a small responsiveness boost without saturating.
         self.declare_parameter("steer_gain",            1.2)
-        self.declare_parameter("steer_limit",           0.41)
+        self.declare_parameter("steer_limit",           0.4189)  # F1TENTH mechanical limit = 24°
         # Safety / speed
-        self.declare_parameter("imminent_dist",         0.40)  # m — hard brake threshold
+        # Hard-stop threshold (forward cone lidar). 0.30 m suits a ~1 m wide
+        # SLAM track — wider (e.g. 0.40) routinely catches the side walls
+        # of curving corridors and deadlocks the car at startup.
+        self.declare_parameter("imminent_dist",         0.30)
+        # Half-angle (rad) of the forward cone used by imminent + approach
+        # taper. π/9 ≈ 20°. Narrower than ±30° so side-walls in a curving
+        # corridor don't trigger the brake.
+        self.declare_parameter("imminent_cone_rad",     math.pi / 9)
         self.declare_parameter("avoidance_speed_scale", 0.85)  # speed fraction when swerving
         self.declare_parameter("replan_hold_ticks",     20)
         self.declare_parameter("clear_hold_ticks",      15)
 
+        # Steering low-pass (matches pure_pursuit): higher = more responsive,
+        # lower = smoother. 0.4 is a good balance for slow tight-corner driving.
+        self.declare_parameter("steer_smooth_weight",   0.4)
+
+        # ── One-lap auto-stop (mirrors pure_pursuit) ──
+        # Subscribes to /initialpose (RViz "2D Pose Estimate"). Once the car
+        # has driven >lap_far_threshold m away from that point and returned
+        # within lap_close_threshold m, commanded speed is forced to 0.
+        # Republishing /initialpose resets the detector.
+        self.declare_parameter("lap_topic",             "/initialpose")
+        self.declare_parameter("lap_far_threshold",     2.0)
+        self.declare_parameter("lap_close_threshold",   0.6)
+
         p = lambda name: self.get_parameter(name).value
+        self.car_width           = float(p("car_width"))
+        self.wheelbase           = float(p("wheelbase"))
+        self.odom_topic          = str(p("odom_topic"))
+        self.twist_topic         = str(p("twist_topic"))
+        self.min_speed_cap       = float(p("min_speed"))
+        self.max_speed_cap       = float(p("max_speed"))
         self.max_offset          = p("max_offset")
-        self.safety_radius       = p("safety_radius")
+        self.safety_buffer       = float(p("safety_buffer"))
+        # Effective collision-clearance = car physical half-width + tunable buffer.
+        # Wires car_width into the algorithm so changing the mechanical constant
+        # automatically tightens/loosens obstacle checks.
+        self.safety_radius       = self.car_width / 2.0 + self.safety_buffer
         self.track_half_width    = p("track_half_width")
         self.plan_horizon        = p("plan_horizon")
         self.num_offsets         = p("num_offsets")
@@ -75,14 +147,29 @@ class LatticePlanner(Node):
         self.steer_gain          = p("steer_gain")
         self.steer_limit         = p("steer_limit")
         self.imminent_dist       = p("imminent_dist")
+        self.imminent_cone_rad   = float(p("imminent_cone_rad"))
         self.avoidance_speed_scale = p("avoidance_speed_scale")
         self.replan_hold_ticks   = int(p("replan_hold_ticks"))
         self.clear_hold_ticks    = int(p("clear_hold_ticks"))
+        self.steer_smooth_weight = float(p("steer_smooth_weight"))
+        self.lap_topic           = str(p("lap_topic"))
+        self.lap_far_threshold   = float(p("lap_far_threshold"))
+        self.lap_close_threshold = float(p("lap_close_threshold"))
+        # Lap-stop and direction-detect state (matches pure_pursuit).
+        self.lap_start: object   = None    # np.ndarray when set
+        self.lap_far             = False
+        self.lap_done            = False
+        self._direction_checked  = False
 
         # Derived constants (not exposed — change safety_radius/imminent_dist instead)
+        # Trigger/check bands sit slightly outside the required clearance so
+        # the planner reacts a bit early. Margin = max(safety_buffer, 0.05)
+        # so it shrinks together with safety_buffer on narrow tracks (a
+        # fixed +0.15 m left no room inside a 0.25 m half-corridor margin).
+        trigger_margin              = max(self.safety_buffer, 0.05)
         self._required_clearance    = self.safety_radius
-        self._trigger_clearance     = self.safety_radius + 0.15  # earlier state-transition trigger
-        self._lateral_check_band    = self.safety_radius + 0.15  # match trigger so wider obs are seen
+        self._trigger_clearance     = self.safety_radius + trigger_margin
+        self._lateral_check_band    = self.safety_radius + trigger_margin
         self._obs_approach_start    = 4.0 * self.imminent_dist   # begin taper at 4× hard-brake dist
         self._obs_approach_min_frac = 0.5                        # floor speed fraction at approach
         self._max_lat_accel         = 3.0   # m/s² — speed cap from path curvature (hairpin safety)
@@ -105,14 +192,47 @@ class LatticePlanner(Node):
         self.offsets = np.linspace(-self.max_offset, self.max_offset, self.num_offsets)
 
         # ── ROS I/O ───────────────────────────────────────────────────────────
-        self.scan_sub  = self.create_subscription(LaserScan, "/scan",             self._scan_cb, 10)
-        self.odom_sub  = self.create_subscription(Odometry,  "/ego_racecar/odom", self._odom_cb, 10)
+        # /scan from RPLidar driver is BEST_EFFORT — must match here or
+        # this subscription receives zero messages.
+        self.scan_sub  = self.create_subscription(LaserScan, "/scan",             self._scan_cb, qos_profile_sensor_data)
+        self.odom_sub  = self.create_subscription(Odometry,  self.odom_topic,     self._odom_cb, 10)
+        if self.twist_topic:
+            self.twist_sub = self.create_subscription(
+                Odometry, self.twist_topic, self._twist_cb, 10
+            )
+            self.get_logger().info(
+                f"speed source: {self.twist_topic} (twist on {self.odom_topic} ignored)"
+            )
         self.drive_pub = self.create_publisher(AckermannDriveStamped, "/drive",               10)
         self.cand_pub  = self.create_publisher(MarkerArray,  "/lattice/candidates",           10)
         self.sel_pub   = self.create_publisher(Marker,       "/lattice/selected",             10)
         self.obs_pub   = self.create_publisher(MarkerArray,  "/lattice/obstacles",            10)
 
+        if self.lap_far_threshold > 0.0:
+            self.lap_sub = self.create_subscription(
+                PoseWithCovarianceStamped, self.lap_topic,
+                self._lap_cb, 1
+            )
+            self.get_logger().info(
+                f"lap stop: set start with RViz '2D Pose Estimate' on "
+                f"{self.lap_topic} (need to travel >{self.lap_far_threshold:.1f} m "
+                f"away, return within {self.lap_close_threshold:.1f} m)"
+            )
+
         self.get_logger().info("Lattice planner ready.")
+
+    def _lap_cb(self, msg: PoseWithCovarianceStamped):
+        # Each /initialpose message defines a NEW lap-start point and resets
+        # the lap-complete detector. Republish the arrow to start another lap.
+        p = msg.pose.pose.position
+        self.lap_start = np.array([p.x, p.y])
+        self.lap_far = False
+        self.lap_done = False
+        self.get_logger().info(
+            f"lap start ← ({p.x:+.2f}, {p.y:+.2f})  "
+            f"(need: travel >{self.lap_far_threshold:.1f} m away, "
+            f"return within {self.lap_close_threshold:.1f} m → STOP)"
+        )
 
     # ── Waypoint loading ─────────────────────────────────────────────────────
 
@@ -183,6 +303,11 @@ class LatticePlanner(Node):
 
     # ── Main odom callback ────────────────────────────────────────────────────
 
+    def _twist_cb(self, msg: Odometry):
+        # Separate twist source — used when odom_topic carries pose but no
+        # twist (e.g. /dedicate_odom in map frame).
+        self.current_speed = msg.twist.twist.linear.x
+
     def _odom_cb(self, msg: Odometry):
         if self.scan_pts_car is None:
             return
@@ -192,8 +317,47 @@ class LatticePlanner(Node):
         qz  = msg.pose.pose.orientation.z
         qw  = msg.pose.pose.orientation.w
         yaw = 2.0 * math.atan2(qz, qw)
-        self.current_speed = msg.twist.twist.linear.x
+        if not self.twist_topic:
+            self.current_speed = msg.twist.twist.linear.x
         curr_pos = np.array([px, py])
+
+        # Path direction auto-detect (one-shot, mirrors pure_pursuit). If the
+        # car is facing opposite the loop's stored ordering, flip the path.
+        if not self._direction_checked:
+            n_now = int(np.argmin(np.linalg.norm(self.waypoints - curr_pos, axis=1)))
+            nxt = (n_now + 1) % self.num_pts
+            pv = self.waypoints[nxt] - self.waypoints[n_now]
+            path_yaw = math.atan2(pv[1], pv[0])
+            yd = (yaw - path_yaw + math.pi) % (2 * math.pi) - math.pi
+            if abs(yd) > math.pi / 2:
+                self.waypoints = self.waypoints[::-1]
+                self.wp_velocities = self.wp_velocities[::-1]
+                self.normals = self._calc_normals()
+                self.prev_nearest = 0
+                self.get_logger().warn(
+                    f"Path direction reversed at startup "
+                    f"(Δ={math.degrees(yd):+.0f}°)"
+                )
+            else:
+                self.get_logger().info(
+                    f"Path direction matches car heading "
+                    f"(Δ={math.degrees(yd):+.0f}°)"
+                )
+            self._direction_checked = True
+
+        # Lap-complete detector.
+        if self.lap_start is not None and not self.lap_done:
+            d = float(np.linalg.norm(curr_pos - self.lap_start))
+            if not self.lap_far and d > self.lap_far_threshold:
+                self.lap_far = True
+                self.get_logger().info(
+                    f"lap: passed far threshold (d={d:.2f} m), watching for return"
+                )
+            elif self.lap_far and d < self.lap_close_threshold:
+                self.lap_done = True
+                self.get_logger().warn(
+                    f"LAP COMPLETE — stopping (d={d:.2f} m from start)"
+                )
 
         nearest       = self._find_nearest(curr_pos)
         self.prev_nearest = nearest
@@ -206,14 +370,14 @@ class LatticePlanner(Node):
 
         obs_map, wall_map = self._build_obs_and_wall_maps(R, curr_pos, global_window)
 
-        # Narrow ±30° forward cone for imminent brake and approach taper.
-        # A wider x>0.1 filter picks up track walls at corners (40-60° off-heading)
-        # and false-triggers both checks. The cone angle excludes those.
+        # Forward cone (configurable; default ±20°) for imminent brake and
+        # approach taper. A wider cone picks up the side walls of a curving
+        # corridor and deadlocks the car at startup — keep it tight.
         fwd_mask     = self.scan_pts_car[:, 0] > 0.05
         scan_fwd_car = self.scan_pts_car[fwd_mask] if fwd_mask.any() else np.zeros((0, 2))
         if len(scan_fwd_car) > 0:
             cone_ang     = np.abs(np.arctan2(scan_fwd_car[:, 1], scan_fwd_car[:, 0]))
-            scan_fwd_car = scan_fwd_car[cone_ang <= (math.pi / 6)]   # ±30°
+            scan_fwd_car = scan_fwd_car[cone_ang <= self.imminent_cone_rad]
         imminent = (len(scan_fwd_car) > 0 and
                     float(np.linalg.norm(scan_fwd_car, axis=1).min()) < self.imminent_dist)
 
@@ -279,9 +443,10 @@ class LatticePlanner(Node):
             global_window + win_normals * self.committed_offset, curr_pos)
         steer, speed = self._pure_pursuit(curr_pos, yaw, best_path, nearest)
 
-        # Steering damping. 0.5 leaves visible heading shake at speed; 0.4 is
-        # the sweet spot between hairpin responsiveness and straight-line stability.
-        alpha = 0.3
+        # Steering low-pass (tuneable via steer_smooth_weight — matches
+        # pure_pursuit). Higher = more responsive, lower = smoother. 0.4
+        # is the sweet spot for slow tight-corner driving.
+        alpha = self.steer_smooth_weight
         steer = alpha * steer + (1.0 - alpha) * self.prev_steer
         self.prev_steer = steer
 
@@ -306,9 +471,17 @@ class LatticePlanner(Node):
             v_curve = math.sqrt(self._max_lat_accel / kappa)
             speed = min(speed, v_curve)
 
-        # Hard cap when any forward point is very close
+        # Hard stop when any forward-cone (±30°) lidar return is closer than
+        # imminent_dist (default 0.40 m). Matches the pure_pursuit safety
+        # stop — full brake until the path clears, not a slowdown. The
+        # `imminent` flag is recomputed each tick from current lidar, so
+        # the car auto-resumes when the obstacle is gone.
         if imminent:
-            speed = min(speed, 0.3)
+            speed = 0.0
+            self.get_logger().warn(
+                f"EMERGENCY STOP — obstacle within {self.imminent_dist:.2f} m",
+                throttle_duration_sec=1.0,
+            )
 
         # Smooth taper as forward obstacle approaches
         if len(scan_fwd_car) > 0:
@@ -319,9 +492,15 @@ class LatticePlanner(Node):
                 frac  = self._obs_approach_min_frac + (1.0 - self._obs_approach_min_frac) * t
                 speed *= frac
 
+        # Lap-complete override: hold the wheel steady at current steering
+        # but command zero speed until /initialpose is republished.
+        if self.lap_done:
+            speed = 0.0
+
         drive = AckermannDriveStamped()
         drive.header.stamp         = self.get_clock().now().to_msg()
-        drive.drive.speed          = float(max(speed, 0.0))
+        drive.drive.speed          = float(np.clip(speed, self.min_speed_cap,
+                                                          self.max_speed_cap))
         drive.drive.steering_angle = float(steer)
         self.drive_pub.publish(drive)
 
@@ -480,25 +659,39 @@ class LatticePlanner(Node):
                     self.min_lookahead, self.max_lookahead)
         cy, sy = math.cos(-yaw), math.sin(-yaw)
 
-        # Find first path point past arc-length L that is also in front of the
-        # car (local_x > 0). At a hairpin the raceline wraps, so a naive
-        # "first point past L" can land beside or behind the car and produce
-        # garbage steering.
+        # Find first path segment whose accumulated arc exceeds L, then
+        # interpolate INSIDE that segment to land exactly L metres ahead.
+        # Snapping to the next discrete waypoint (the previous behaviour)
+        # introduced 0.3 m step-changes in the target → step-changes in
+        # steering → "bang-bang" feel on tight corners. Also require the
+        # landed target to be in front of the car (local_x > 0.05) so a
+        # path that wraps at a hairpin doesn't pick a point beside/behind.
         target = path[-1]
         arc = 0.0
         for i in range(len(path) - 1):
-            arc += np.linalg.norm(path[i + 1] - path[i])
-            pt = path[i + 1]
-            dx, dy = pt[0] - pos[0], pt[1] - pos[1]
-            if arc >= L and (cy*dx - sy*dy) > 0.05:
-                target = pt
-                break
+            seg = path[i + 1] - path[i]
+            seg_len = float(np.linalg.norm(seg))
+            if arc + seg_len >= L and seg_len > 1e-9:
+                t = (L - arc) / seg_len
+                candidate = path[i] + t * seg
+                dx, dy = candidate[0] - pos[0], candidate[1] - pos[1]
+                if (cy*dx - sy*dy) > 0.05:
+                    target = candidate
+                    break
+            arc += seg_len
 
         dx, dy = target[0] - pos[0], target[1] - pos[1]
         local_x, local_y = cy*dx - sy*dy, sy*dx + cy*dy
         L_act = max(math.hypot(local_x, local_y), 1e-6)
-        steer = float(np.clip(self.steer_gain * 2.0 * local_y / L_act**2,
-                               -self.steer_limit, self.steer_limit))
+        # Bicycle-model pure pursuit: steer = atan(L * κ) where κ = 2y/Ld².
+        # steer_gain is a responsiveness multiplier on top of the physical
+        # bicycle output (1.0 = pure model truth, higher = aggressive). The
+        # default (steer_gain=4.0 × wheelbase=0.30 = 1.2) preserves the
+        # behaviour of the previous `1.2 × κ` formula.
+        curvature = 2.0 * local_y / (L_act ** 2)
+        steer = float(np.clip(
+            self.steer_gain * math.atan(self.wheelbase * curvature),
+            -self.steer_limit, self.steer_limit))
         return steer, float(self.wp_velocities[nearest_idx])
 
     # ── Visualisation ─────────────────────────────────────────────────────────

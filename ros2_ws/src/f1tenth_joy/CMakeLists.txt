@@ -33,6 +33,7 @@ install(PROGRAMS
   scripts/cmd_to_joint_state.py
   scripts/imu_calibrator.py
   scripts/imu_filter.py
+  scripts/trajectory_publisher.py
   DESTINATION lib/${PROJECT_NAME}
 )
 

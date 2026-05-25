@@ -10,6 +10,7 @@ from scipy.spatial.transform import Rotation as R
 
 import rclpy
 from rclpy.node import Node
+from rclpy.qos import qos_profile_sensor_data
 from sensor_msgs.msg import LaserScan
 from nav_msgs.msg import Odometry, OccupancyGrid
 from geometry_msgs.msg import Pose
@@ -69,7 +70,9 @@ class StanleyAvoidance(Node):
         self.get_logger().info(f"Loaded {len(self.waypoints_world)} waypoints")
 
         self.odom_sub = self.create_subscription(Odometry, self.odom_topic, self.odom_callback, 1)
-        self.scan_sub = self.create_subscription(LaserScan, self.scan_topic, self.scan_callback, 1)
+        # /scan from RPLidar driver is BEST_EFFORT — must match here or
+        # this subscription receives zero messages.
+        self.scan_sub = self.create_subscription(LaserScan, self.scan_topic, self.scan_callback, qos_profile_sensor_data)
         self.drive_pub = self.create_publisher(AckermannDriveStamped, self.drive_topic, 10)
         self.target_pub = self.create_publisher(Marker, "/viz/drive_target", 10)
         self.grid_pub = self.create_publisher(OccupancyGrid, "/occupancy_grid", 10)

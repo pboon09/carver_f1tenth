@@ -17,8 +17,9 @@ class GapFollow(Node):
 
         self.declare_parameter("scan_topic", "/scan")
         self.declare_parameter("drive_topic", "/drive")
-        self.declare_parameter("min_speed", 0.3)
-        self.declare_parameter("max_speed", 0.5)
+        self.declare_parameter("min_speed", 0.5)
+        self.declare_parameter("max_speed", 0.7
+                               )
         self.declare_parameter("max_steering_angle", 0.4189)
         self.declare_parameter("steering_smoothing", 0.65)
         self.declare_parameter("car_width", 0.33)
@@ -87,8 +88,8 @@ class GapFollow(Node):
         return angle_min + idx * angle_increment
 
     def create_bubble_radius(self, distance_to_obstacle):
-        if distance_to_obstacle < 1.0:
-            return self.car_width * 1.1
+        if distance_to_obstacle < 1.5:
+            return self.car_width * 1.3
         elif distance_to_obstacle < 2.0:
             return self.car_width * 1.0
         else:
@@ -136,7 +137,9 @@ class GapFollow(Node):
         return 1.0
 
     def linear_velocity_controller(self, delta_distance, steering_angle):
-        if delta_distance < 0.8:
+        if delta_distance < 0.3:
+            speed = 0.0
+        elif delta_distance < 0.8:
             speed = self.min_speed
         elif delta_distance > 2.5:
             speed = self.max_speed

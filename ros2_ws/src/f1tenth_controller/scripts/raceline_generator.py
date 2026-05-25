@@ -82,7 +82,9 @@ def world_to_pixels(xy_m, res, ox, oy, shape):
 # ── Contour-based centerline extraction ───────────────────────────────────────
 
 def extract_centerline(map_yaml: str, spacing: float = 0.3,
-                        wall_thresh: int = 100):
+                        wall_thresh: int = 100,
+                        contour_ids: list = None,
+                        skip_outer: int = 1):
     """
     Extract the track centerline by:
       1. Thresholding the map image to find wall pixels
@@ -108,20 +110,68 @@ def extract_centerline(map_yaml: str, spacing: float = 0.3,
     if len(contours) < 2:
         sys.exit("ERROR: fewer than 2 wall contours found — check --map and thresholds")
 
-    # Sort by perimeter (descending) and print info
+    # Print a sorted-by-perimeter summary with depth in the hierarchy so the
+    # user can pick contour IDs manually via --contour-ids if the auto-pick
+    # is wrong (common on noisy slam_toolbox maps).
+    h = hierarchy[0]
+
+    def depth(i: int) -> int:
+        d = 0
+        cur = int(h[i][3])
+        while cur != -1:
+            d += 1
+            cur = int(h[cur][3])
+        return d
+
     c_info = sorted(enumerate(contours),
                     key=lambda ic: cv2.arcLength(ic[1], True), reverse=True)
-    for rank, (i, c) in enumerate(c_info[:6]):
+    print(f"  Contours found ({len(contours)}, top 8 by perimeter):")
+    for rank, (i, c) in enumerate(c_info[:8]):
         p = cv2.arcLength(c, True) * res
-        par = hierarchy[0][i][3]
-        print(f"  [{rank}] contour {i}: {len(c)} pts, perimeter={p:.1f} m, parent={par}")
+        par = int(h[i][3])
+        print(f"    [rank {rank}] id={i}  depth={depth(i)}  pts={len(c)}  "
+              f"perimeter={p:.1f} m  parent={par}")
 
-    if len(c_info) >= 4:
-        contours = [c_info[1][1], c_info[2][1]]
-        print(f"  Using contours ranked 1 and 2 as track boundaries")
+    if contour_ids is not None:
+        # Explicit override: user supplied --contour-ids OUTER,INNER.
+        try:
+            outer_id, inner_id = contour_ids
+            contours = [contours[outer_id], contours[inner_id]]
+            print(f"  Using user-specified contour ids: "
+                  f"outer={outer_id}, inner={inner_id}")
+        except (IndexError, ValueError, TypeError):
+            sys.exit(f"ERROR: --contour-ids {contour_ids} invalid for "
+                     f"{len(contours)} contours")
     else:
-        contours = [c_info[0][1], c_info[1][1]]
-        print(f"  Using contours ranked 0 and 1 as track boundaries")
+        # Hierarchy-aware default: SLAM maps usually have an outermost noisy
+        # hull (the entire scanned region). The actual track is one or more
+        # depth levels in. Pick the largest contour at depth = skip_outer,
+        # and its largest descendant — that's the track outer+inner walls.
+        by_depth: dict = {}
+        for i, c in enumerate(contours):
+            by_depth.setdefault(depth(i), []).append((i, c))
+        for d in by_depth:
+            by_depth[d].sort(key=lambda ic: cv2.arcLength(ic[1], True),
+                             reverse=True)
+
+        outer_depth = skip_outer
+        inner_depth = skip_outer + 1
+        if outer_depth in by_depth and inner_depth in by_depth:
+            outer_idx, outer_c = by_depth[outer_depth][0]
+            inner_idx, inner_c = by_depth[inner_depth][0]
+            contours = [outer_c, inner_c]
+            print(f"  Auto-picked (skip_outer={skip_outer}): "
+                  f"outer=id{outer_idx} (depth {outer_depth}), "
+                  f"inner=id{inner_idx} (depth {inner_depth})")
+        else:
+            # Fallback: no nested structure — use legacy 2-largest heuristic.
+            print(f"  WARNING: no nested contours at depth {outer_depth}/"
+                  f"{inner_depth}; falling back to two-largest heuristic. "
+                  f"Pass --contour-ids OUTER,INNER to override.")
+            if len(c_info) >= 4:
+                contours = [c_info[1][1], c_info[2][1]]
+            else:
+                contours = [c_info[0][1], c_info[1][1]]
 
     def contour_to_world(c):
         pts_cr = c[:, 0, :]
@@ -151,73 +201,200 @@ def extract_centerline(map_yaml: str, spacing: float = 0.3,
         d = np.linalg.norm(np.diff(closed, axis=0), axis=1)
         return np.concatenate([[0.0], np.cumsum(d)])
 
-    fine_sp = spacing * 0.5
-    c0_s = resample_contour(c0_world, fine_sp)
-    c1_s = resample_contour(c1_world, fine_sp)
+    # ── Centerline via medial axis of the corridor mask ─────────────────────
+    # Build a binary mask of the corridor (between the two walls), then take
+    # its medial axis — the locus of points equidistant from the two walls.
+    # This is the true centerline and is robust to wall irregularity (SLAM
+    # noise, jagged inner-island outlines, etc.), because it operates on the
+    # filled corridor region rather than on individual wall outlines.
+    from skimage.morphology import medial_axis
 
-    sa0 = signed_area(c0_s); sa1 = signed_area(c1_s)
-    print(f"  Winding: c0={'CCW' if sa0>0 else 'CW'}, c1={'CCW' if sa1>0 else 'CW'}")
-    if np.sign(sa0) != np.sign(sa1):
-        c1_s = c1_s[::-1]
-
-    c1_s = np.roll(c1_s, -int(np.argmin(np.linalg.norm(c1_s - c0_s[0], axis=1))), axis=0)
-
-    N = min(len(c0_s), len(c1_s))
-    s0 = arc_lengths_closed(c0_s); s0n = np.append(s0[:-1]/s0[-1], 1.0)
-    s1 = arc_lengths_closed(c1_s); s1n = np.append(s1[:-1]/s1[-1], 1.0)
-    c0e = np.vstack([c0_s, c0_s[0]]); c1e = np.vstack([c1_s, c1_s[0]])
-    t = np.linspace(0, 1, N, endpoint=False)
-    c0m = np.column_stack([np.interp(t, s0n, c0e[:,0]), np.interp(t, s0n, c0e[:,1])])
-    c1m = np.column_stack([np.interp(t, s1n, c1e[:,0]), np.interp(t, s1n, c1e[:,1])])
-    estimates = (c0m + c1m) / 2.0
-
-    estimates = resample_contour(estimates, spacing)
-    print(f"  Phase 1: {len(estimates)} ordered estimates")
-
-    free_mask = (wall_mask == 0).astype(np.uint8)
-    edt_raw = distance_transform_edt(free_mask)
-    edt = gaussian_filter(edt_raw, sigma=0.5)
-
-    neighbours = [(-1,-1),(-1,0),(-1,1),(0,-1),(0,1),(1,-1),(1,0),(1,1)]
     H, W_px = img.shape
-    n_est = len(estimates)
-    xy_raw = np.zeros((n_est, 2))
-    w_raw  = np.zeros(n_est)
+    # world_to_pixels returns (N,2) as (row,col). cv2.fillPoly wants (col,row).
+    outer_rc = world_to_pixels(c0_world, res, ox, oy, img.shape).astype(np.int32)
+    inner_rc = world_to_pixels(c1_world, res, ox, oy, img.shape).astype(np.int32)
+    outer_pix_xy = outer_rc[:, ::-1]
+    inner_pix_xy = inner_rc[:, ::-1]
 
-    print(f"  Phase 2: snapping {n_est} estimates to EDT ridge …")
-    for i in range(n_est):
-        rc = world_to_pixels(estimates[i:i+1], res, ox, oy, img.shape)[0]
-        r, c_px = int(rc[0]), int(rc[1])
-        for _ in range(100):
-            best_val = edt[r, c_px]
-            br, bc = r, c_px
-            for dr, dc in neighbours:
-                nr, nc = r + dr, c_px + dc
-                if 0 <= nr < H and 0 <= nc < W_px and edt[nr, nc] > best_val:
-                    best_val = edt[nr, nc]; br, bc = nr, nc
-            if br == r and bc == c_px:
-                break
-            r, c_px = br, bc
-        xy_raw[i] = pixels_to_world(np.array([[r, c_px]]), res, ox, oy)[0]
-        w_raw[i]  = np.clip(edt_raw[r, c_px] * res, 0.1, 5.0)
+    outer_fill = np.zeros((H, W_px), dtype=np.uint8)
+    inner_fill = np.zeros((H, W_px), dtype=np.uint8)
+    cv2.fillPoly(outer_fill, [outer_pix_xy], 1)
+    cv2.fillPoly(inner_fill, [inner_pix_xy], 1)
+    # Corridor = inside outer wall, outside inner island, AND not a wall pixel
+    # itself — so every original wall pixel is an edge of the corridor mask.
+    corridor_mask = (outer_fill.astype(bool) & ~inner_fill.astype(bool)
+                     & ~wall_mask.astype(bool))
+    print(f"  Corridor pixels: {int(corridor_mask.sum())} "
+          f"({int(corridor_mask.sum()) * res * res:.1f} m²)")
 
-    xy = xy_raw.copy()
-    w  = w_raw.copy()
+    skeleton, dist = medial_axis(corridor_mask, return_distance=True)
+
+    # Prune spur branches: iteratively delete endpoints (skeleton pixels with
+    # ≤1 skeleton neighbor) until only the closed loop remains.
+    sk = skeleton.copy()
+    nbrs = [(-1,-1),(-1,0),(-1,1),(0,-1),(0,1),(1,-1),(1,0),(1,1)]
+
+    def _neighbor_count(sk_arr, r, c):
+        n = 0
+        for dr, dc in nbrs:
+            rr, cc = r + dr, c + dc
+            if 0 <= rr < H and 0 <= cc < W_px and sk_arr[rr, cc]:
+                n += 1
+        return n
+
+    pruned = 0
+    while True:
+        rows, cols = np.where(sk)
+        to_remove = [(int(r), int(c)) for r, c in zip(rows, cols)
+                     if _neighbor_count(sk, int(r), int(c)) <= 1]
+        if not to_remove:
+            break
+        for r, c in to_remove:
+            sk[r, c] = False
+        pruned += len(to_remove)
+
+    # Small wall fragments inside the corridor (slam noise islands) create
+    # their own little medial-axis loops next to the main one. The walker
+    # only follows the loop containing its start pixel, so keep only the
+    # LARGEST connected component of the pruned skeleton — that's the
+    # one true loop around the inner island.
+    sk_u8 = sk.astype(np.uint8)
+    n_sk, sk_labels = cv2.connectedComponents(sk_u8, connectivity=8)
+    if n_sk >= 2:
+        sk_sizes = np.bincount(sk_labels.flatten())
+        sk_sizes[0] = 0
+        largest_lbl = int(np.argmax(sk_sizes))
+        kept = int(sk_sizes[largest_lbl])
+        sk = (sk_labels == largest_lbl)
+        if n_sk - 1 > 1:
+            print(f"  Skeleton: pruned {pruned} spurs, dropped {n_sk - 2} "
+                  f"satellite loops (wall noise islands); kept main loop "
+                  f"with {kept} pixels")
+        else:
+            print(f"  Skeleton: pruned {pruned} spurs; "
+                  f"{kept} pixels remain in the closed loop")
+    else:
+        print(f"  Skeleton: pruned {pruned} spurs; "
+              f"{int(sk.sum())} pixels remain in the closed loop")
+
+    rows, cols = np.where(sk)
+    if len(rows) < 4:
+        sys.exit("ERROR: medial-axis loop too small — check the corridor mask. "
+                 "Try a different --contour-ids pair.")
+
+    # The skeleton may still contain T-junctions where a small parasitic
+    # loop (from wall noise) attaches to the main loop. A greedy walker
+    # picks one branch and dead-ends. Use networkx to enumerate cycles in
+    # the skeleton graph and pick the LONGEST one — that's the main loop
+    # around the inner island.
+    import networkx as nx
+    G = nx.Graph()
+    pixel_list = [(int(r), int(c)) for r, c in zip(rows, cols)]
+    G.add_nodes_from(pixel_list)
+    for r, c in pixel_list:
+        for dr, dc in nbrs:
+            rr, cc = r + dr, c + dc
+            if (0 <= rr < H and 0 <= cc < W_px and sk[rr, cc]
+                    and (rr, cc) > (r, c)):
+                G.add_edge((r, c), (rr, cc))
+
+    basis = nx.cycle_basis(G)
+    if not basis:
+        sys.exit("ERROR: skeleton has no closed cycle — corridor topology bad.")
+    # Pick longest cycle by node count (≈ perimeter, since all pixels are
+    # adjacent unit-spaced).
+    ordered_pix = max(basis, key=len)
+    print(f"  Skeleton graph: {len(G.nodes)} nodes, {len(G.edges)} edges, "
+          f"{len(basis)} cycle(s) in basis; main loop = {len(ordered_pix)} px")
+
+    # World coordinates + half-width from the medial-axis distance.
+    rc_arr = np.array(ordered_pix, dtype=float)
+    centerline_world = pixels_to_world(rc_arr, res, ox, oy)
+    half_widths = np.array([dist[r, c] * res for r, c in ordered_pix])
+
+    # Resample at the target spacing along the loop.
+    closed = np.vstack([centerline_world, centerline_world[:1]])
+    seg_lens = np.linalg.norm(np.diff(closed, axis=0), axis=1)
+    s = np.concatenate([[0.0], np.cumsum(seg_lens)])
+    total = float(s[-1])
+    n_target = max(int(round(total / spacing)), 12)
+    s_targets = np.linspace(0.0, total, n_target, endpoint=False)
+    xs = np.interp(s_targets, s, np.append(centerline_world[:, 0],
+                                           centerline_world[0, 0]))
+    ys = np.interp(s_targets, s, np.append(centerline_world[:, 1],
+                                           centerline_world[0, 1]))
+    xy = np.column_stack([xs, ys])
+    hw_closed = np.append(half_widths, half_widths[0])
+    w = np.interp(s_targets, s, hw_closed)
+    print(f"  Resampled to {len(xy)} waypoints at spacing={spacing} m "
+          f"(perimeter={total:.1f} m)")
+
+    # Perpendicular-balance refinement: medial axis = locus of max-inscribed
+    # circle, which on asymmetric corridors sits closer to the side with the
+    # bigger "open" wall (further from a bump on the other side). That's
+    # geometrically the "max clearance" path but it looks off-center to the
+    # eye. Iteratively nudge each waypoint along its perpendicular so the
+    # ray-cast distances to both walls are equal — gives a visually centered
+    # path with gap_L ≈ gap_R, while still living inside the corridor.
+    def _ray_distance(p, direction, max_steps=80):
+        for k in range(1, max_steps + 1):
+            q = p + direction * (k * res)
+            col = int((q[0] - ox) / res)
+            row = int((q[1] - oy) / res)
+            if (not (0 <= row < H and 0 <= col < W_px)
+                    or not corridor_mask[row, col]):
+                return k * res
+        return max_steps * res
+
+    n = len(xy)
+    step_cap = 8 * res   # cap per-iteration move to avoid overshoot in narrows
+    for _it in range(5):
+        new_xy = xy.copy()
+        moved = 0.0
+        for i in range(n):
+            tangent = xy[(i + 1) % n] - xy[(i - 1) % n]
+            t_norm = np.linalg.norm(tangent)
+            if t_norm < 1e-6:
+                continue
+            tangent /= t_norm
+            normal = np.array([-tangent[1], tangent[0]])
+            d_plus  = _ray_distance(xy[i], normal)
+            d_minus = _ray_distance(xy[i], -normal)
+            offset = 0.5 * (d_plus - d_minus)
+            offset = max(-step_cap, min(step_cap, offset))
+            new_xy[i] = xy[i] + normal * offset
+            moved += abs(offset)
+        xy = new_xy
+        if moved / n < 0.01:   # converged: average move < 1 cm/waypoint
+            break
+    print(f"  Perp-balanced in {_it + 1} iters; mean |offset| now ≈ "
+          f"{moved / n * 1000:.1f} mm/waypoint")
 
     sigma = 2.0
     xy[:, 0] = gaussian_filter1d(xy[:, 0], sigma=sigma, mode="wrap")
     xy[:, 1] = gaussian_filter1d(xy[:, 1], sigma=sigma, mode="wrap")
     w = gaussian_filter1d(w, sigma=sigma, mode="wrap")
+    w = np.clip(w, 0.1, 5.0)
 
     print(f"  Centerline: {len(xy)} waypoints, "
           f"half-width [{w.min():.2f}, {w.max():.2f}] m")
     gap = np.linalg.norm(xy[-1] - xy[0])
     print(f"  Loop closure gap: {gap:.2f} m")
 
+    # EDT for the Phase 3 ray-cast hard-cap below (kept from previous algo).
+    free_mask = (wall_mask == 0).astype(np.uint8)
+    edt_raw = distance_transform_edt(free_mask)
+    w_raw = np.array([
+        edt_raw[int((y - oy) / res), int((x - ox) / res)] * res
+        for x, y in xy
+    ])
+
     # ── Phase 3: ray-cast actual left/right widths along normals ────────────
-    # EDT gives distance to nearest wall — used as a hard cap so that if a ray
-    # shoots through a gap in the wall (parallel sections, chicanes), it cannot
-    # exceed the true nearest-wall distance at that centerline point.
+    # Walks each perpendicular ray until it hits a wall pixel. No EDT cap —
+    # the previous version capped both rays at the nearest-wall distance,
+    # which on asymmetric corridors silently clipped the FAR wall to look
+    # equal to the NEAR wall. Now the blue corridor envelope reaches the
+    # actual wall on each side independently.
     normals_tmp = np.zeros((len(xy), 2))
     for i in range(len(xy)):
         fwd = xy[(i + 1) % len(xy)] - xy[(i - 1) % len(xy)]
@@ -226,7 +403,7 @@ def extract_centerline(map_yaml: str, spacing: float = 0.3,
         normals_tmp[i] = n_vec / norm if norm > 1e-9 else n_vec
 
     step_m    = res
-    max_steps = int(4.0 / step_m)   # never search further than 4 m
+    max_steps = int(4.0 / step_m)   # safety: never search further than 4 m
     H_px, W_px2 = wall_mask.shape
     w_left  = np.full(len(xy), 4.0)
     w_right = np.full(len(xy), 4.0)
@@ -234,19 +411,20 @@ def extract_centerline(map_yaml: str, spacing: float = 0.3,
     for i in range(len(xy)):
         x0, y0 = float(xy[i, 0]), float(xy[i, 1])
         nx, ny = float(normals_tmp[i, 0]), float(normals_tmp[i, 1])
-        edt_cap = float(w_raw[i])   # nearest-wall distance — hard cap per direction
         for k in range(1, max_steps + 1):
             col = int((x0 + k * step_m * nx - ox) / res)
             row = int((y0 + k * step_m * ny - oy) / res)
-            hit_wall = not (0 <= row < H_px and 0 <= col < W_px2) or wall_mask[row, col]
-            if hit_wall or k * step_m >= edt_cap:
-                w_left[i] = min(k * step_m, edt_cap); break
+            if (not (0 <= row < H_px and 0 <= col < W_px2)
+                    or wall_mask[row, col]):
+                w_left[i] = k * step_m
+                break
         for k in range(1, max_steps + 1):
             col = int((x0 - k * step_m * nx - ox) / res)
             row = int((y0 - k * step_m * ny - oy) / res)
-            hit_wall = not (0 <= row < H_px and 0 <= col < W_px2) or wall_mask[row, col]
-            if hit_wall or k * step_m >= edt_cap:
-                w_right[i] = min(k * step_m, edt_cap); break
+            if (not (0 <= row < H_px and 0 <= col < W_px2)
+                    or wall_mask[row, col]):
+                w_right[i] = k * step_m
+                break
 
     w_left  = gaussian_filter1d(w_left,  sigma=2.0, mode="wrap")
     w_right = gaussian_filter1d(w_right, sigma=2.0, mode="wrap")
@@ -448,7 +626,15 @@ def _limit_curvature(xy: np.ndarray, kappa_max: float,
       wheelbase L  ≈ 0.33 m
       max steer δ  ≈ 0.41 rad
       R_min = L / tan(δ) ≈ 0.76 m  →  kappa_max = 1/R_min ≈ 1.32 rad/m
+
+    If max_iters runs out without converging (e.g. the input has a corner
+    too tight to fix by triple-point averaging), the *input* path is
+    returned with a warning — repeated averaging on a non-convergent path
+    eventually collapses the loop toward its centroid, which destroys the
+    centerline. Better to drive the unfixed path cautiously than a tight
+    O-ring around nothing.
     """
+    original = xy.copy()
     xy = xy.copy()
     n  = len(xy)
     for iteration in range(max_iters):
@@ -457,17 +643,19 @@ def _limit_curvature(xy: np.ndarray, kappa_max: float,
         if not bad_mask.any():
             print(f"  Curvature OK after {iteration} iterations "
                   f"(max κ = {kappa.max():.3f})")
-            break
+            return xy
         for i in np.where(bad_mask)[0]:
             for idx in [(i - 1) % n, i, (i + 1) % n]:
                 prev_i = (idx - 1) % n
                 next_i = (idx + 1) % n
                 xy[idx] = (xy[prev_i] + xy[idx] + xy[next_i]) / 3.0
-    else:
-        kappa = calc_curvature(xy)
-        print(f"  Warning: curvature still {kappa.max():.3f} after {max_iters} iters "
-              f"({bad_mask.sum()} points above limit)")
-    return xy
+    kappa_now = calc_curvature(xy)
+    kappa_orig = calc_curvature(original)
+    print(f"  Warning: curvature still {kappa_now.max():.3f} after {max_iters} "
+          f"iters (input had max κ = {kappa_orig.max():.3f}). Reverting to "
+          f"input path — raise --kappa-max or pass --no-curvature-limit if you "
+          f"intend to drive a corner this tight slowly.")
+    return original
 
 
 def calc_speed_profile(xy: np.ndarray, v_max: float,
@@ -555,9 +743,12 @@ def save_png(map_yaml: str,
 
     # ── Track corridor (half-width envelope around centerline) ────────────────
     normals = calc_normals(xy_center)
-    half_w  = np.minimum(w_right, w_left)
-    left_bd  = xy_center + normals * half_w[:, np.newaxis]
-    right_bd = xy_center - normals * half_w[:, np.newaxis]
+    # Use the true ray-cast distances independently on each side, so the
+    # blue corridor envelope follows the real wall (not a symmetric
+    # min-of-both, which underplots wherever the corridor isn't centered
+    # to start with).
+    left_bd  = xy_center + normals * w_left[:, np.newaxis]
+    right_bd = xy_center - normals * w_right[:, np.newaxis]
 
     # Fill corridor as a closed polygon (left boundary + reversed right boundary)
     corridor_x = np.concatenate([left_bd[:, 0],  right_bd[::-1, 0], [left_bd[0, 0]]])
@@ -746,14 +937,40 @@ def main():
     parser.add_argument("--kappa-max", type=float, default=1.32,
                         help="Max path curvature = 1/R_min (default: 1.32 rad/m "
                              "= R_min 0.76m, matches F1TENTH wheelbase/steer limit)")
+    parser.add_argument("--contour-ids", default=None,
+                        help="Manual contour selection 'OUTER,INNER' (cv2 ids "
+                             "printed in the contour summary). Use this when "
+                             "the auto-pick traces a noisy outer hull instead "
+                             "of the real track walls.")
+    parser.add_argument("--skip-outer", type=int, default=1,
+                        help="How many outer hierarchy levels to peel before "
+                             "looking for the track (default: 1 — assumes the "
+                             "outermost contour is the noisy scan boundary). "
+                             "Ignored when --contour-ids is given.")
+    parser.add_argument("--no-curvature-limit", action="store_true",
+                        help="Skip the post-hoc curvature smoothing step. "
+                             "Use this when the raw centerline is fine but "
+                             "the smoother destroys it (e.g. tight oval "
+                             "tracks with a wiggly inner island).")
     parser.add_argument("--png", default=None,
                         help="Path for diagnostic PNG (default: same stem as --out)")
     args = parser.parse_args()
 
     # ── Step 1: Extract centerline ────────────────────────────────────────────
     print("\n── Step 1: Centerline extraction (contour-based) ──")
+    contour_ids = None
+    if args.contour_ids:
+        try:
+            contour_ids = [int(x) for x in args.contour_ids.split(",")]
+            if len(contour_ids) != 2:
+                raise ValueError
+        except ValueError:
+            sys.exit("ERROR: --contour-ids must be 'OUTER,INNER' "
+                     "with two integers (e.g. 169,171)")
     xy_center, w_right, w_left = extract_centerline(
-        args.map, spacing=args.spacing)
+        args.map, spacing=args.spacing,
+        contour_ids=contour_ids,
+        skip_outer=args.skip_outer)
 
     # ── Step 2: Generate racing line ──────────────────────────────────────────
     print(f"\n── Step 2: Lane = '{args.lane}' ──")
@@ -785,8 +1002,11 @@ def main():
         xy_race[:, 1] = gaussian_filter1d(xy_race[:, 1], sigma=args.smooth_sigma, mode="wrap")
 
     # ── Step 2c: Curvature limiting (respect car's steering ability) ─────────
-    print(f"\n── Step 2c: Curvature limit (κ_max={args.kappa_max:.2f} rad/m) ──")
-    xy_race = _limit_curvature(xy_race, kappa_max=args.kappa_max)
+    if args.no_curvature_limit:
+        print(f"\n── Step 2c: Curvature limit SKIPPED (--no-curvature-limit) ──")
+    else:
+        print(f"\n── Step 2c: Curvature limit (κ_max={args.kappa_max:.2f} rad/m) ──")
+        xy_race = _limit_curvature(xy_race, kappa_max=args.kappa_max)
 
     # No post-hoc safety fixation — the QP wall margin already includes a
     # smooth_buffer to absorb downstream smoothing/curvature-limit drift.

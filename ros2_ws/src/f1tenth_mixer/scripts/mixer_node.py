@@ -10,7 +10,7 @@ import numpy as np
 class MixerNode(Node):
     def __init__(self):
         super().__init__('mixer_node')
-        
+
         self.vesc_cmd_publisher = self.create_publisher(Int32, '/vesc/cmd', 10)
         self.steering_publisher = self.create_publisher(Float32, '/steering_angle', 10)
 

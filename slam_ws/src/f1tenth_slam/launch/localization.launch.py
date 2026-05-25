@@ -1,55 +1,60 @@
 #!/usr/bin/env python3
 """
-F1TENTH localization bringup — Nav2 AMCL flavour.
+F1TENTH SLAM localization bringup — slam_toolbox flavour, map-file selectable.
 
-Stack:
-  sensors (rplidar + bno055)            → /scan, /imu/data
-  imu_filter                             → /imu_filter
-  vesc_velocity                          → /vesc/twist
-  robot_localization EKF                 → odom → base_link TF
-  map_server   (loads my_map.pgm/.yaml)  → /map
-  amcl         (particle filter)         → map → odom TF
-  lifecycle_manager                       → activates map_server + amcl
-  rviz
+Same shape as mapping.launch.py except slam_toolbox runs in localization
+mode against a pre-built pose graph. The pose graph basename is passed in
+via the `map_file_name:=<path>` launch argument (default below). The GUI's
+"Localize against selected map" button in the Maps tab sets this arg from
+whichever saved map you pick.
 
-What's NOT here vs the mapping launch:
-  - slam_toolbox is gone — replaced by AMCL
-  - the EKF is kept (AMCL needs odom→base_link from somewhere)
+Required files at <map_file_name>.posegraph and .data — save them while
+mapping with:
+    ros2 service call /slam_toolbox/serialize_map \
+        slam_toolbox/srv/SerializePoseGraph \
+        "{filename: '<map_file_name>'}"
 
-Run:
+Run directly:
     ros2 launch f1tenth_slam localization.launch.py
+    ros2 launch f1tenth_slam localization.launch.py map_file_name:=/path/to/foo
 """
 
 import datetime
 import os
 
+import lifecycle_msgs.msg
 from ament_index_python.packages import get_package_share_directory
 from launch import LaunchDescription
 from launch.actions import (
+    DeclareLaunchArgument,
+    EmitEvent,
     ExecuteProcess,
     IncludeLaunchDescription,
+    LogInfo,
+    RegisterEventHandler,
     TimerAction,
 )
+from launch.events import matches_action
 from launch.launch_description_sources import PythonLaunchDescriptionSource
-from launch_ros.actions import Node
+from launch.substitutions import LaunchConfiguration
+from launch_ros.actions import LifecycleNode, Node
+from launch_ros.event_handlers import OnStateTransition
+from launch_ros.events.lifecycle import ChangeState
 
 
 def generate_launch_description():
     pkg = get_package_share_directory("f1tenth_slam")
-    amcl_params = os.path.join(pkg, "config", "amcl_params.yaml")
+    slam_params = os.path.join(pkg, "config", "slam_toolbox_localize_param.yaml")
     ekf_params = os.path.join(pkg, "config", "ekf_imu.yaml")
-    rviz_config = os.path.join(pkg, "rviz", "slam.rviz")
-    map_yaml = "/home/carver/carver_f1tenth/map/my_map.yaml"
+    rviz_config = os.path.join(pkg, "rviz", "loc.rviz")
 
-    # Fail fast — AMCL with a missing map yaml is just as confusing as the
-    # old slam_toolbox-missing-posegraph failure.
-    if not os.path.exists(map_yaml):
-        raise FileNotFoundError(
-            f"Map yaml missing: {map_yaml}\n"
-            f"Save the map first with:\n"
-            f"  ros2 run nav2_map_server map_saver_cli -f "
-            f"/home/carver/carver_f1tenth/map/my_map"
-        )
+    declare_map = DeclareLaunchArgument(
+        "map_file_name",
+        default_value="/home/carver/carver_f1tenth/map/my_map",
+        description="Pose-graph basename for slam_toolbox to load "
+                    "(no extension — .posegraph and .data are appended).",
+    )
+    map_file_name = LaunchConfiguration("map_file_name")
 
     urdf_path = os.path.join(
         get_package_share_directory("f1tenth_urdf"),
@@ -78,12 +83,47 @@ def generate_launch_description():
         ],
     )
 
-    ekf_node = Node(
+    tf_odom_to_base = Node(
         package="robot_localization",
         executable="ekf_node",
         name="ekf_filter_node",
         output="screen",
         parameters=[ekf_params],
+    )
+
+    # slam_toolbox in localization mode. We pass the YAML file PLUS a
+    # one-key dict that overrides `map_file_name` at runtime — that's how
+    # the launch-arg gets injected into slam_toolbox's parameter set.
+    slam_toolbox_node = LifecycleNode(
+        package="slam_toolbox",
+        executable="localization_slam_toolbox_node",
+        name="slam_toolbox",
+        namespace="",
+        output="screen",
+        parameters=[
+            slam_params,
+            {"map_file_name": map_file_name},
+        ],
+    )
+
+    configure_slam = EmitEvent(
+        event=ChangeState(
+            lifecycle_node_matcher=matches_action(slam_toolbox_node),
+            transition_id=lifecycle_msgs.msg.Transition.TRANSITION_CONFIGURE,
+        )
+    )
+    activate_slam = RegisterEventHandler(
+        OnStateTransition(
+            target_lifecycle_node=slam_toolbox_node,
+            start_state="configuring",
+            goal_state="inactive",
+            entities=[
+                EmitEvent(event=ChangeState(
+                    lifecycle_node_matcher=matches_action(slam_toolbox_node),
+                    transition_id=lifecycle_msgs.msg.Transition.TRANSITION_ACTIVATE,
+                ))
+            ],
+        )
     )
 
     robot_state_publisher = Node(
@@ -123,39 +163,29 @@ def generate_launch_description():
         parameters=[{
             "wheel_radius": 0.0594,
             "gear_ratio": 29.75,
+            "wheelbase": 0.30,           # URDF: 0.192757 − (−0.10719)
             "publish_rate": 100.0,
             "base_frame": "basefootprint",
-            # AMCL needs a real translation prior on odom→base_link. Loose
-            # vx (20.0 m²/s²) basically pinned odom at the origin in xy →
-            # particles never tracked the car. Tightened to 0.5 → 1σ ≈ 0.7
-            # m/s, so the EKF actually integrates wheel velocity into xy.
-            "vx_covariance": 0.5,
+            # Loose — this car slips a lot. IMU gyro + slam scan-match
+            # are the trustworthy signals; wheel odom is dead-reckon filler.
+            "vx_covariance": 2.0,        # 1σ ≈ 1.4 m/s
+            "vyaw_covariance": 1.0,      # 1σ ≈ 57°/s
         }],
     )
 
-    # --- Nav2 localization stack: map_server + amcl + lifecycle_manager ---
-    map_server = Node(
-        package="nav2_map_server",
-        executable="map_server",
-        name="map_server",
+    trajectory_publisher = Node(
+        package="f1tenth_joy",
+        executable="trajectory_publisher.py",
+        name="trajectory_publisher",
         output="screen",
-        parameters=[amcl_params],
-    )
-
-    amcl = Node(
-        package="nav2_amcl",
-        executable="amcl",
-        name="amcl",
-        output="screen",
-        parameters=[amcl_params],
-    )
-
-    lifecycle_manager = Node(
-        package="nav2_lifecycle_manager",
-        executable="lifecycle_manager",
-        name="lifecycle_manager_localization",
-        output="screen",
-        parameters=[amcl_params],
+        parameters=[{
+            "parent_frame": "map",
+            "child_frame": "base_link",
+            "rate": 100.0,            # sample TF at 100 Hz — matches EKF + map→odom rate
+            "publish_rate": 100.0,    # republish full path at 100 Hz
+            "max_poses": 5000,
+            "min_distance": 0.02,
+        }],
     )
 
     rviz_node = Node(
@@ -166,33 +196,19 @@ def generate_launch_description():
         output="screen",
     )
 
-    stamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
-    bag_dir = os.path.expanduser(f"~/slam_logs/loc_{stamp}")
-    os.makedirs(os.path.dirname(bag_dir), exist_ok=True)
-    bag_record = ExecuteProcess(
-        cmd=[
-            "ros2", "bag", "record",
-            "-o", bag_dir,
-            "/scan", "/imu/data", "/imu_filter",
-            "/odometry/filtered", "/tf", "/tf_static",
-            "/vesc/state", "/vesc/twist", "/vesc/slip",
-            "/map", "/amcl_pose", "/particle_cloud", "/initialpose",
-        ],
-        output="screen",
-    )
-    delayed_bag = TimerAction(period=5.0, actions=[bag_record])
-
     return LaunchDescription([
+        declare_map,
+        LogInfo(msg=["[localization.launch.py] map_file_name = ", map_file_name]),
         sensor_launch,
         tf_base_to_laser,
-        ekf_node,
+        tf_odom_to_base,
         robot_state_publisher,
         joint_state_publisher,
         imu_filter,
         vesc_velocity,
-        map_server,
-        amcl,
-        lifecycle_manager,
+        slam_toolbox_node,
+        activate_slam,
+        configure_slam,
+        trajectory_publisher,
         rviz_node,
-        delayed_bag,
     ])

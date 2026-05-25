@@ -216,11 +216,26 @@ def generate_launch_description():
             "gear_ratio": 29.75,
             "publish_rate": 100.0,
             "base_frame": "basefootprint",
-            # 20.0 m²/s² → 1σ ≈ 4.5 m/s. Loosened further from 10 because
-            # wheel-vel is still pulling the map around during slip. With this
-            # the EKF treats wheel-vel as a very weak prior, lets SLAM
-            # dominate xy almost entirely.
-            "vx_covariance": 20.0,
+            # 0.5 m²/s² → 1σ ≈ 0.7 m/s. Tight enough that the EKF integrates
+            # wheel velocity into odom xy at 100 Hz — gives smooth dead-
+            # reckoning between scan-match corrections (lidar 10 Hz). Loose
+            # enough to absorb wheel slip without locking in a wrong velocity.
+            "vx_covariance": 0.5,
+        }],
+    )
+
+    trajectory_publisher = Node(
+        package="f1tenth_joy",
+        executable="trajectory_publisher.py",
+        name="trajectory_publisher",
+        output="screen",
+        parameters=[{
+            "parent_frame": "map",
+            "child_frame": "base_link",
+            "rate": 50.0,
+            "publish_rate": 20.0,
+            "max_poses": 5000,
+            "min_distance": 0.02,
         }],
     )
 
@@ -231,31 +246,6 @@ def generate_launch_description():
         arguments=["-d", rviz_config],
         output="screen",
     )
-
-    # Auto-record a rosbag of every topic SLAM analysis needs. Path is
-    # timestamped so multiple runs don't collide. Started 5 s after launch
-    # so sensors + slam_toolbox are publishing before we capture.
-    stamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
-    bag_dir = os.path.expanduser(f"~/slam_logs/{stamp}")
-    os.makedirs(os.path.dirname(bag_dir), exist_ok=True)
-    bag_record = ExecuteProcess(
-        cmd=[
-            "ros2", "bag", "record",
-            "-o", bag_dir,
-            # sensors
-            "/scan", "/imu/data", "/imu_filter",
-            # state estimation
-            "/odometry/filtered", "/tf", "/tf_static",
-            # wheel side (diagnostic, not used as EKF input here)
-            "/vesc/state", "/vesc/twist", "/vesc/slip",
-            # slam_toolbox outputs
-            "/map", "/map_metadata", "/pose",
-            "/slam_toolbox/graph_visualization",
-            "/slam_toolbox/scan_visualization",
-        ],
-        output="screen",
-    )
-    delayed_bag = TimerAction(period=5.0, actions=[bag_record])
 
     return LaunchDescription([
         sensor_launch,
@@ -268,6 +258,6 @@ def generate_launch_description():
         slam_toolbox_node,
         activate_slam,    # register handler BEFORE we emit the configure event
         configure_slam,
+        trajectory_publisher,
         rviz_node,
-        delayed_bag,
     ])

@@ -87,6 +87,27 @@ Visualization Manager:
         Reliability Policy: Best Effort
         Value: /imu/data
       Value: false
+    - Class: rviz_default_plugins/Path
+      Name: Trajectory
+      Enabled: true
+      Topic:
+        Depth: 5
+        Durability Policy: Volatile
+        Filter size: 10
+        History Policy: Keep Last
+        Reliability Policy: Reliable
+        Value: /trajectory
+      Color: 25; 200; 50
+      Alpha: 1.0
+      Line Style: Lines
+      Line Width: 0.03
+      Buffer Length: 1
+      Offset:
+        X: 0
+        Y: 0
+        Z: 0
+      Pose Style: None
+      Value: true
   Enabled: true
   Global Options:
     Background Color: 48; 48; 48

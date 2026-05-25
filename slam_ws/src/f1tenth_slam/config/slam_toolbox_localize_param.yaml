@@ -1,0 +1,119 @@
+slam_toolbox:
+  ros__parameters:
+
+    # ---------- Plugin ----------
+    solver_plugin: solver_plugins::CeresSolver
+    ceres_linear_solver: SPARSE_NORMAL_CHOLESKY
+    ceres_preconditioner: SCHUR_JACOBI
+    ceres_trust_strategy: LEVENBERG_MARQUARDT
+    ceres_dogleg_type: TRADITIONAL_DOGLEG
+    ceres_loss_function: None
+
+    # ---------- Frames (real-car TF tree) ----------
+    odom_frame: odom
+    map_frame: map
+    # slam_toolbox publishes map → odom so that `base_frame` ends up at z=0
+    # in the map. Using `basefootprint` (ground-level link from URDF) keeps
+    # the wheels on the floor instead of sinking them into the occupancy
+    # grid. Switch back to `base_link` only if you also remove the
+    # URDF basefootprint joint and the z=0.1189 lift in mapping.launch.py.
+    base_frame: basefootprint
+
+    # ---------- Topics ----------
+    scan_topic: /scan
+
+    # ---------- Mode ----------
+    # Localization-only. slam_toolbox loads a pre-built pose graph and
+    # scan-matches new scans against the locked submaps; no new submaps
+    # are added.
+    mode: localization
+
+    # Pose graph basename (no extension — slam_toolbox appends .posegraph
+    # and .data). Overridden at launch time by the GUI's "Localize against
+    # selected map" button, which passes `map_file_name:=<...>` via
+    # base_loc.launch.py. The value below is the fallback if you run the
+    # launch with no override.
+    map_file_name: /home/carver/carver_f1tenth/map/my_map
+    map_start_pose: [0.0, 0.0, 0.0]
+
+    # ---------- Timing — close to official localization defaults ----------
+    # Previous tight config (0.05 / 0.01 / 0.2) hit 762 ms TF lag on this
+    # NUC. Backed off to roughly match SteveMacenski's defaults for
+    # mapper_params_localization.yaml — scan-match at 5 Hz (loc is refinement,
+    # not real-time), 50 Hz TF rebroadcast, and /map at 0.2 Hz since the
+    # map is loaded and doesn't change.
+    # Macenski official localization defaults — except transform_publish_period
+    # bumped to 100 Hz so the TF stream stays as fresh as the EKF.
+    # → Pose available at 100 Hz when consumed via TF: every 100 Hz EKF tick
+    #   composes with the latest map→odom (refreshed by scan-match at 2 Hz).
+    minimum_time_interval: 0.1        # 10 Hz cap — at the lidar rate (RPLidar C1)
+    transform_publish_period: 0.01    # 100 Hz map → odom republish
+    map_update_interval: 1.0       # 0.2 Hz /map republish (official default)
+    transform_timeout: 0.2
+    tf_buffer_duration: 30.0
+
+    # ---------- Sensor ----------
+    # Full RPLidar C1 indoor range — distant walls are massive yaw anchors
+    # for scan-match. Spotty visual cells at long range don't hurt
+    # localization accuracy; the matcher uses ray endpoints directly.
+    max_laser_range: 12.0
+    # ~50% tighter than Macenski → matches trigger ~2× more often.
+    minimum_travel_distance: 0.05
+    minimum_travel_heading: 0.05
+
+    # ---------- Map ----------
+    resolution: 0.05
+    use_map_saver: false              # loading, not building
+
+    # ---------- Scan matching ----------
+    use_scan_matching: true
+    use_scan_barycenter: true
+    # +67% over Macenski for more context → more stable scan-matches.
+    scan_buffer_size: 5
+    scan_buffer_maximum_scan_distance: 10.0
+    link_match_minimum_response_fine: 0.1
+    link_scan_maximum_distance: 1.5
+
+    # ---------- Loop closure ----------
+    # OFF in localization mode — the loaded pose graph is locked.
+    do_loop_closing: false
+    loop_search_maximum_distance: 3.0     # Macenski default (was 6.0; loop closure is off anyway)
+    loop_match_minimum_chain_size: 10
+    loop_match_maximum_variance_coarse: 3.0
+    loop_match_minimum_response_coarse: 0.35
+    loop_match_minimum_response_fine: 0.45
+
+    # ---------- Correlation (scan-matching search grid) ----------
+    # Macenski official localization defaults: 0.5 m search window @ 1 cm
+    # resolution. Smear_deviation clamped to 0.08 (karto's hard ceiling) —
+    # Macenski's published 0.1 trips karto's "Smear deviation too small:
+    # must be between 0.004 and 0.08" assertion on this build.
+    correlation_search_space_dimension: 0.5
+    correlation_search_space_resolution: 0.01
+    correlation_search_space_smear_deviation: 0.08
+
+    # ---------- Loop search space ----------
+    loop_search_space_dimension: 8.0
+    loop_search_space_resolution: 0.05
+    loop_search_space_smear_deviation: 0.03
+
+    # ---------- Scan matcher penalties ----------
+    # Reverted to the previous "working better" config after the 0.3/0.5
+    # + 40° search run produced 24° single-update jumps and 38°/min map
+    # drift. The wider search box let scan-match snap to far-off correlation
+    # peaks in feature-poor moments. Tight penalties + narrow search keep
+    # scan-match honest at the cost of some prior-following during turns.
+    distance_variance_penalty: 0.5
+    angle_variance_penalty: 1.0           # official default — was 2.0
+    fine_search_angle_offset: 0.00349     # ~0.2 deg — official default
+    coarse_search_angle_offset: 0.349     # ~20 deg — Macenski default
+    coarse_angle_resolution: 0.018        # ~1.0 deg — 2× finer than Macenski 2°
+    minimum_angle_penalty: 0.9            # Macenski default
+    minimum_distance_penalty: 0.5
+    use_response_expansion: true
+
+    # ---------- Misc ----------
+    debug_logging: false
+    throttle_scans: 1               # process every scan (1 of 1)
+    stack_size_to_use: 40000000
+    enable_interactive_mode: true

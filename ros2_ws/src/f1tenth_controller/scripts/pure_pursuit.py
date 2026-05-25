@@ -9,7 +9,10 @@ from scipy.spatial.transform import Rotation as R
 
 import rclpy
 from rclpy.node import Node
+from rclpy.qos import qos_profile_sensor_data
 from nav_msgs.msg import Odometry
+from sensor_msgs.msg import LaserScan
+from geometry_msgs.msg import PoseWithCovarianceStamped
 from visualization_msgs.msg import Marker
 from ackermann_msgs.msg import AckermannDriveStamped
 from ament_index_python.packages import get_package_share_directory
@@ -19,34 +22,88 @@ class PurePursuit(Node):
     def __init__(self):
         super().__init__("pure_pursuit_node")
 
+        # Pure pursuit tracks waypoints; it has no notion of car geometry
+        # since it doesn't do obstacle avoidance or clearance checks. The
+        # mechanical steering limit IS enforced (see `steering_limit`
+        # below = 0.4189 rad = 24°, matching gap_follow + lattice).
+        # car_width / wheelbase are NOT declared here on purpose — they
+        # don't apply to this algorithm.
         self.declare_parameter("waypoints_path", "")
-        self.declare_parameter("odom_topic", "/ego_racecar/odom")
+        # On-car defaults — /dedicate_odom is the pose stream in the map
+        # frame from trajectory_publisher (slam_toolbox + EKF). /odometry/filtered
+        # is the EKF state for the speed signal (since /dedicate_odom has
+        # zero twist). For the gym sim, override to /ego_racecar/odom and
+        # leave twist_topic empty so twist comes from the same message.
+        self.declare_parameter("odom_topic",  "/dedicate_odom")
+        self.declare_parameter("twist_topic", "/odometry/filtered")
         self.declare_parameter("drive_topic", "/drive")
 
         # Speed
-        self.declare_parameter("velocity", 1.5)
+        self.declare_parameter("velocity", 0.5)
+        # Safety clamp on the commanded speed (applied after the path-yaml
+        # speed profile is sampled). Defaults to a slow crawl while tuning;
+        # raise max_speed once the path tracks cleanly.
+        self.declare_parameter("min_speed", 0.0)
+        self.declare_parameter("max_speed", 0.3)
 
-        # Lookahead — scales linearly with speed between min and max
-        self.declare_parameter("min_lookahead", 0.5)
-        self.declare_parameter("max_lookahead", 2.0)
+        # Lookahead — scales linearly with speed between min and max.
+        # min_lookahead=0.6 m gives the controller ~2 waypoints of warning
+        # before each corner so steering can ramp instead of stepping.
+        self.declare_parameter("min_lookahead", 0.6)
+        self.declare_parameter("max_lookahead", 1.5)
         self.declare_parameter("min_lookahead_speed", 0.0)
         self.declare_parameter("max_lookahead_speed", 7.0)
 
-        # Steering gain (P) — decreases at higher speed to avoid oscillation
-        self.declare_parameter("min_gain", 0.4)
-        self.declare_parameter("max_gain", 0.7)
+        # Steering P-gain — multiplies path curvature κ to get a steering
+        # angle command. At κ=1.3 rad/m (the tightest corner on this track)
+        # a gain of 0.30 (≈ wheelbase) produces ~21° which lives inside the
+        # 24° steering limit → no saturation. Higher gains pin the steering
+        # at the limit through every corner ("bang-bang"). Scheduled lower
+        # at high speed to suppress oscillation in dynamics.
+        self.declare_parameter("min_gain", 0.3)
+        self.declare_parameter("max_gain", 0.45)
         self.declare_parameter("gain_speed_scale", 7.0)
 
         # Derivative gain for damping
         self.declare_parameter("D", 2.0)
 
-        self.declare_parameter("steering_limit", 24.0)   # degrees
+        # Steering low-pass: steer = smooth_weight*new + (1-smooth_weight)*prev.
+        # Higher = more responsive but jitterier; lower = smoother but laggy.
+        # 0.4 is a balance for slow tight-corner driving — enough smoothing
+        # to hide the per-waypoint discretization noise without lagging the
+        # corner entry.
+        self.declare_parameter("steer_smooth_weight", 0.4)
+
+        self.declare_parameter("steering_limit", 24.0)   # degrees (= 0.4189 rad, mechanical limit)
         self.declare_parameter("lookahead_window", 50)   # waypoints to search ahead
+
+        # ── Safety: lidar-based emergency stop ─────────────────────────────
+        # If any lidar return inside the forward arc is closer than
+        # safety_stop_distance, publish speed=0 until clear. Disable by
+        # setting safety_stop_distance <= 0.
+        self.declare_parameter("scan_topic",            "/scan")
+        self.declare_parameter("safety_stop_distance",  0.35)  # m
+        self.declare_parameter("safety_arc_deg",        90.0)  # ± half this around forward
+        self.declare_parameter("safety_min_range",      0.05)  # ignore returns below this (sensor noise)
+
+        # ── One-lap auto-stop ─────────────────────────────────────────────
+        # Subscribes to /initialpose (RViz "2D Pose Estimate" arrow). Once
+        # the car has driven at least lap_far_threshold metres away from
+        # that point AND returned within lap_close_threshold of it, the
+        # commanded speed is forced to 0. Republishing /initialpose resets
+        # the detector so the next lap can begin. Disable by setting
+        # lap_far_threshold <= 0.
+        self.declare_parameter("lap_topic",            "/initialpose")
+        self.declare_parameter("lap_far_threshold",    2.0)   # m
+        self.declare_parameter("lap_close_threshold",  0.6)   # m
 
         # Read parameters
         self.odom_topic  = str(self.get_parameter("odom_topic").value)
+        self.twist_topic = str(self.get_parameter("twist_topic").value)
         self.drive_topic = str(self.get_parameter("drive_topic").value)
         self.velocity    = float(self.get_parameter("velocity").value)
+        self.min_speed   = float(self.get_parameter("min_speed").value)
+        self.max_speed   = float(self.get_parameter("max_speed").value)
 
         self.min_lookahead       = float(self.get_parameter("min_lookahead").value)
         self.max_lookahead       = float(self.get_parameter("max_lookahead").value)
@@ -58,8 +115,22 @@ class PurePursuit(Node):
         self.gain_speed_scale = float(self.get_parameter("gain_speed_scale").value)
         self.D               = float(self.get_parameter("D").value)
 
-        self.steering_limit   = float(self.get_parameter("steering_limit").value)
-        self.lookahead_window = int(self.get_parameter("lookahead_window").value)
+        self.steering_limit       = float(self.get_parameter("steering_limit").value)
+        self.lookahead_window     = int(self.get_parameter("lookahead_window").value)
+        self.steer_smooth_weight  = float(self.get_parameter("steer_smooth_weight").value)
+
+        self.scan_topic            = str(self.get_parameter("scan_topic").value)
+        self.safety_stop_distance  = float(self.get_parameter("safety_stop_distance").value)
+        self.safety_arc_deg        = float(self.get_parameter("safety_arc_deg").value)
+        self.safety_min_range      = float(self.get_parameter("safety_min_range").value)
+        self.emergency_stop        = False
+
+        self.lap_topic             = str(self.get_parameter("lap_topic").value)
+        self.lap_far_threshold     = float(self.get_parameter("lap_far_threshold").value)
+        self.lap_close_threshold   = float(self.get_parameter("lap_close_threshold").value)
+        self.lap_start             = None    # np.ndarray when set
+        self.lap_far               = False
+        self.lap_done              = False
 
         # Load waypoints (also sets self.waypoint_velocities)
         self.waypoint_velocities = None
@@ -74,15 +145,50 @@ class PurePursuit(Node):
         self.prev_d_item      = 0.0
         self.prev_steer       = 0.0
         self.target_point     = None
+        # Set True after the first odom message; used to one-shot reverse
+        # the path if the car is facing opposite the loop direction at start
+        # (raceline_generator picks an arbitrary CW/CCW orientation).
+        self._direction_checked = False
 
         # Subscriptions / publications
         self.odom_sub  = self.create_subscription(Odometry, self.odom_topic, self.odom_callback, 1)
+        if self.twist_topic:
+            self.twist_sub = self.create_subscription(
+                Odometry, self.twist_topic, self._twist_callback, 1
+            )
+            self.get_logger().info(
+                f"speed source: {self.twist_topic} (twist on {self.odom_topic} ignored)"
+            )
         self.drive_pub = self.create_publisher(AckermannDriveStamped, self.drive_topic, 10)
         self.target_pub = self.create_publisher(Marker, "/pure_pursuit/target", 10)
         self.path_pub   = self.create_publisher(Marker, "/pure_pursuit/path", 10)
 
-        # Publish path every second so RViz always receives it
-        self.create_timer(1.0, self._publish_path)
+        if self.safety_stop_distance > 0.0:
+            self.scan_sub = self.create_subscription(
+                LaserScan, self.scan_topic, self._scan_callback,
+                qos_profile_sensor_data
+            )
+            self.get_logger().info(
+                f"safety: stop if forward-arc(±{self.safety_arc_deg/2:.0f}°) "
+                f"lidar < {self.safety_stop_distance:.2f} m"
+            )
+
+        if self.lap_far_threshold > 0.0:
+            self.lap_sub = self.create_subscription(
+                PoseWithCovarianceStamped, self.lap_topic,
+                self._lap_callback, 1
+            )
+            self.get_logger().info(
+                f"lap stop: set start with RViz '2D Pose Estimate' on "
+                f"{self.lap_topic} (need to travel >{self.lap_far_threshold:.1f} m "
+                f"away, return within {self.lap_close_threshold:.1f} m)"
+            )
+
+        # Publish path immediately and then twice a second so RViz picks
+        # it up within the first frame after the controller starts, and
+        # late-joining subscribers still see it.
+        self._publish_path()
+        self.create_timer(0.5, self._publish_path)
 
     # ------------------------------------------------------------------
     # Waypoint loading
@@ -112,6 +218,51 @@ class PurePursuit(Node):
     # Main callback
     # ------------------------------------------------------------------
 
+    def _twist_callback(self, msg: Odometry):
+        # Separate twist source — used when odom_topic carries pose but no
+        # twist (e.g. /dedicate_odom in map frame).
+        self.current_speed = msg.twist.twist.linear.x
+
+    def _lap_callback(self, msg: PoseWithCovarianceStamped):
+        # Each /initialpose message defines a NEW lap-start point and resets
+        # the lap-complete detector. Lets the user start another lap by
+        # re-publishing the arrow in RViz after the car has stopped.
+        p = msg.pose.pose.position
+        self.lap_start = np.array([p.x, p.y])
+        self.lap_far = False
+        self.lap_done = False
+        self.get_logger().info(
+            f"lap start ← ({p.x:+.2f}, {p.y:+.2f})  "
+            f"(need: travel >{self.lap_far_threshold:.1f} m away, "
+            f"return within {self.lap_close_threshold:.1f} m → STOP)"
+        )
+
+    def _scan_callback(self, msg: LaserScan):
+        # Trigger emergency stop if the closest lidar return inside the
+        # forward arc is nearer than safety_stop_distance.
+        n = len(msg.ranges)
+        if n == 0:
+            return
+        angles = msg.angle_min + np.arange(n) * msg.angle_increment
+        arc_half = math.radians(self.safety_arc_deg / 2.0)
+        front = np.abs(angles) <= arc_half
+        ranges = np.asarray(msg.ranges)[front]
+        valid = np.isfinite(ranges) & (ranges > self.safety_min_range)
+        if not valid.any():
+            return
+        min_dist = float(ranges[valid].min())
+        stop_now = min_dist < self.safety_stop_distance
+        if stop_now and not self.emergency_stop:
+            self.get_logger().warn(
+                f"EMERGENCY STOP — obstacle {min_dist:.2f} m ahead "
+                f"(threshold {self.safety_stop_distance:.2f} m)"
+            )
+        elif not stop_now and self.emergency_stop:
+            self.get_logger().info(
+                f"path clear ({min_dist:.2f} m), resuming"
+            )
+        self.emergency_stop = stop_now
+
     def odom_callback(self, msg: Odometry):
         pose  = msg.pose.pose
         twist = msg.twist.twist
@@ -119,13 +270,45 @@ class PurePursuit(Node):
         curr_x   = pose.position.x
         curr_y   = pose.position.y
         curr_pos = np.array([curr_x, curr_y])
-        self.current_speed = twist.linear.x
+        if not self.twist_topic:
+            self.current_speed = twist.linear.x
 
         q = pose.orientation
         curr_yaw = math.atan2(
             2.0 * (q.w * q.z + q.x * q.y),
             1.0 - 2.0 * (q.y ** 2 + q.z ** 2)
         )
+
+        # On the first odom message, check whether the loop's CW/CCW
+        # ordering matches the car's current heading. raceline_generator
+        # picks an arbitrary direction; if the car is placed facing the
+        # opposite way, every lookahead target lands BEHIND the car and
+        # pure pursuit dives off the path. Flipping the waypoint order
+        # fixes this once at startup.
+        if not self._direction_checked:
+            nearest_now = int(np.argmin(
+                np.linalg.norm(self.waypoints - curr_pos, axis=1)))
+            nxt = (nearest_now + 1) % self.num_pts
+            path_vec = self.waypoints[nxt] - self.waypoints[nearest_now]
+            path_yaw = math.atan2(path_vec[1], path_vec[0])
+            yaw_diff = (curr_yaw - path_yaw + math.pi) % (2 * math.pi) - math.pi
+            if abs(yaw_diff) > math.pi / 2:
+                self.waypoints = self.waypoints[::-1]
+                if self.waypoint_velocities is not None:
+                    self.waypoint_velocities = self.waypoint_velocities[::-1]
+                self.prev_nearest_idx = None  # rebuild nearest with new order
+                self.get_logger().warn(
+                    f"Path direction reversed at startup: car_yaw="
+                    f"{math.degrees(curr_yaw):+.0f}°, path_yaw="
+                    f"{math.degrees(path_yaw):+.0f}° "
+                    f"(Δ={math.degrees(yaw_diff):+.0f}°)"
+                )
+            else:
+                self.get_logger().info(
+                    f"Path direction matches car heading "
+                    f"(Δ={math.degrees(yaw_diff):+.0f}°)"
+                )
+            self._direction_checked = True
 
         # 1. Find nearest waypoint using local window
         nearest_idx = self._find_nearest(curr_pos)
@@ -149,7 +332,8 @@ class PurePursuit(Node):
         L_actual = max(np.linalg.norm(curr_pos - target_global), 1e-6)
         error    = (2.0 * target_y) / (L_actual ** 2)
         steer    = self._get_steering(self.current_speed, error)
-        steer    = 0.3 * steer + 0.7 * self.prev_steer
+        w        = self.steer_smooth_weight
+        steer    = w * steer + (1.0 - w) * self.prev_steer
         self.prev_steer = steer
 
         # 5. Publish
@@ -158,11 +342,42 @@ class PurePursuit(Node):
             target_speed = float(self.waypoint_velocities[nearest_idx])
         else:
             target_speed = self.velocity
+        target_speed = float(np.clip(target_speed, self.min_speed, self.max_speed))
+
+        # Lap-complete detector — needs both a "far away" excursion and a
+        # "back near start" return so the car can't trigger before moving.
+        if self.lap_start is not None and not self.lap_done:
+            d = float(np.linalg.norm(curr_pos - self.lap_start))
+            if not self.lap_far and d > self.lap_far_threshold:
+                self.lap_far = True
+                self.get_logger().info(
+                    f"lap: passed far threshold (d={d:.2f} m), watching for return"
+                )
+            elif self.lap_far and d < self.lap_close_threshold:
+                self.lap_done = True
+                self.get_logger().warn(
+                    f"LAP COMPLETE — stopping (d={d:.2f} m from start)"
+                )
+
+        # Emergency stop overrides commanded speed but keeps current steering
+        # so the car holds its line while braking.
+        if self.emergency_stop or self.lap_done:
+            target_speed = 0.0
 
         drive_msg = AckermannDriveStamped()
         drive_msg.drive.speed           = target_speed
         drive_msg.drive.steering_angle  = steer
         self.drive_pub.publish(drive_msg)
+
+        # Throttled diagnostic so the user can confirm pure_pursuit IS
+        # publishing commands and what they are. One line per second.
+        self.get_logger().info(
+            f"cmd: v={target_speed:.2f} m/s  δ={math.degrees(steer):+.1f}°  "
+            f"target=({target_global[0]:.2f},{target_global[1]:.2f})  "
+            f"speed_now={self.current_speed:.2f}  "
+            f"{'[E-STOP]' if self.emergency_stop else ''}",
+            throttle_duration_sec=1.0,
+        )
 
         self._draw_marker(self.target_point, self.target_pub, color="yellow")
 
@@ -186,14 +401,22 @@ class PurePursuit(Node):
     # ------------------------------------------------------------------
 
     def _find_lookahead_point(self, curr_pos, nearest_idx, L):
+        # Walk arc-length along the discrete waypoints. When the target arc
+        # length L lands INSIDE a segment, linearly interpolate between the
+        # two waypoints so the lookahead point is a continuous function of
+        # progress — avoids the step-change in steering when L hops to the
+        # next waypoint (the main cause of "jagged" tracking on tight turns).
         arc = 0.0
         idx = nearest_idx
         for _ in range(self.num_pts):
             next_idx = (idx + 1) % self.num_pts
-            arc += np.linalg.norm(self.waypoints[next_idx] - self.waypoints[idx])
-            idx  = next_idx
-            if arc >= L:
-                break
+            seg = self.waypoints[next_idx] - self.waypoints[idx]
+            seg_len = float(np.linalg.norm(seg))
+            if arc + seg_len >= L and seg_len > 1e-9:
+                t = (L - arc) / seg_len
+                return self.waypoints[idx] + t * seg
+            arc += seg_len
+            idx = next_idx
         return self.waypoints[idx].copy()
 
     # ------------------------------------------------------------------

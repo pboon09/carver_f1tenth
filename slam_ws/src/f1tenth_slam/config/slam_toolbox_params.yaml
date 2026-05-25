@@ -99,7 +99,7 @@ slam_toolbox:
     # scan-match honest at the cost of some prior-following during turns.
     distance_variance_penalty: 0.5
     angle_variance_penalty: 2.0
-    fine_search_angle_offset: 0.001       # ~0.06 deg — finer zoom
+    fine_search_angle_offset: 0.01       # ~0.06 deg — finer zoom
     coarse_search_angle_offset: 0.349     # ~20 deg
     coarse_angle_resolution: 0.00873      # ~0.5 deg — half default
     minimum_angle_penalty: 0.7

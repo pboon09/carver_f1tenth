@@ -84,19 +84,23 @@ ekf_filter_node:
     imu0_remove_gravitational_acceleration: false   # BNO055 already removed (LIA register)
     imu0_nodelay: false
 
-    # ---- VESC wheel velocity (vx only, LOOSE trust) ----
-    # vesc_velocity.py publishes /vesc/twist with vx derived from motor RPM.
-    # Covariance on vx is set in vesc_velocity.py via the `vx_covariance`
-    # param (currently 10.0 m²/s² — see mapping.launch.py). With that 1σ ≈
-    # 3 m/s of uncertainty, the EKF only weakly trusts wheel velocity — slip
-    # events get washed out by the SLAM scan-match correction at 10 Hz, while
-    # grip-driving gives the EKF a real 100 Hz xy motion prior that helps
-    # slam_toolbox's scan match converge during fast turns.
+    # ---- VESC Ackermann wheel odom (vx + vyaw, LOOSE trust) ----
+    # vesc_velocity.py publishes /vesc/twist with vx from motor RPM AND vyaw
+    # from bicycle-model kinematics (ω = v·tan(δ)/L using commanded steering).
+    # Both channels carry high covariance (vx ≈ 2.0, vyaw ≈ 1.0) so the EKF
+    # only weakly trusts them — IMU gyro Z dominates yaw rate.
+    #
+    # KNOWN ISSUE: joystick.py and mixer_node.py publish /steering_angle with
+    # OPPOSITE sign conventions (joystick: positive=left, mixer: negative=left
+    # after its * -1.0). Under FGM this makes the bicycle-model ω opposite of
+    # the actual yaw, which the EKF then fights with the IMU. If you observe
+    # SLAM divergence during FGM, fix the sign in mixer_node.py (drop the
+    # * -1.0 on the steering_angle output) or flip this slot back to false.
     twist0: /vesc/twist
     twist0_config: [false, false, false,
                     false, false, false,
                     true,  false, false,
-                    false, false, false,
+                    false, false, true,
                     false, false, false]
     twist0_differential: false
     twist0_relative: false
