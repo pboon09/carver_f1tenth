@@ -83,13 +83,6 @@ marked inline with `[ADAPT-N]` and listed below:
              the path curves. Using the blocked segment's tangent gives
              a shifted target on a path parallel to the original raceline.
 
- [ADAPT-15]  Local-window nearest-waypoint search instead of global
-             argmin. On a closed-loop path the global argmin can jump
-             to the opposite side of the loop after the car drifts.
-             Restricting to ±waypoint_window around the last known
-             index keeps the controller anchored to the segment of path
-             we're actually following.
-
 Note: an earlier prototype replaced upstream's chord-shift avoidance
 with Follow-the-Gap. It was rejected because the resulting algorithm
 loses path-bias — it picks the largest gap regardless of where the
@@ -237,13 +230,28 @@ class StanleyAvoidance(Node):
         # ticks to prevent oscillation when path_blocked flickers
         self.last_avoid_target = None
 
-        # [ADAPT-15] Local-window waypoint index tracking. On a closed-
-        # loop path, argmin(distances) can jump to a waypoint on the
-        # OPPOSITE side of the loop after the car drifts during
-        # avoidance. We restrict the search to ±waypoint_window around
-        # the last used index, with wrap-around for the closed loop.
+        # [ADAPT-15] Local-window nearest-waypoint anchor.
         self._wp_idx = None
-        self.waypoint_window = 12   # ±12 waypoints (±3.6m at 0.3m spacing)
+        self.waypoint_window = 12
+
+        # [ADAPT-16] Lateral offset on stanley's cte. During avoidance we
+        # add a signed offset to the cross-track measurement so stanley
+        # tracks a path PARALLEL to the original raceline, offset by
+        # avoidance_offset_m. The heading term keeps the car aligned with
+        # the original path direction — heading stays parallel, NOT
+        # pointed at a swerve target.
+        self.declare_parameter("avoidance_offset_m", 0.30)
+        self.declare_parameter("offset_ramp_per_tick", 0.02)  # slow ramp (1.5s to full offset)
+        self.avoidance_offset_m = float(self.get_parameter("avoidance_offset_m").value)
+        self.offset_ramp_per_tick = float(self.get_parameter("offset_ramp_per_tick").value)
+        self.target_offset = 0.0
+        self.avoidance_offset = 0.0
+        # Obstacle's world position, set at first confirmed detection.
+        # Used to detect when the car has driven PAST the obstacle (in
+        # world frame, so the test is robust to car rotation).
+        self.obstacle_world_xy = None  # (x, y) or None
+        self.declare_parameter("obstacle_passed_thresh", -0.10)  # car_frame x: <this = passed
+        self.obstacle_passed_thresh = float(self.get_parameter("obstacle_passed_thresh").value)
 
     def _load_waypoints(self):
         waypoints_path = str(self.get_parameter("waypoints_path").value)
@@ -273,26 +281,23 @@ class StanleyAvoidance(Node):
         ])
         return R.inv(R.from_quat(quaternion)).apply(translated)
 
-    def _find_nearest_idx(self, waypoints_car, distances):
-        """[ADAPT-15] Pick the nearest waypoint index, restricted to a
-        local window around the last picked index to prevent jumping to
-        the opposite side of a closed loop."""
+    def _local_nearest(self, distances):
+        """[ADAPT-15] argmin restricted to ±waypoint_window around the
+        last known index, with wrap-around. Prevents jumps to the
+        opposite side of a closed-loop path."""
         n = len(distances)
         if self._wp_idx is None:
-            # First call — global argmin
             return int(np.argmin(distances))
-        # Restrict to ±waypoint_window around last index, with wrap-around
         w = self.waypoint_window
         candidates = [(self._wp_idx + di) % n for di in range(-w, w + 1)]
-        cand_dists = distances[candidates]
-        return candidates[int(np.argmin(cand_dists))]
+        return candidates[int(np.argmin(distances[candidates]))]
 
     def _get_closest_waypoint_with_velocity(self, pose):
         position = (pose.position.x, pose.position.y, 0)
         waypoints_car = self._transform_waypoints(self.waypoints_world, position, pose)
         distances = np.linalg.norm(waypoints_car, axis=1)
-        self.velocity_index = self._find_nearest_idx(waypoints_car, distances)
-        self._wp_idx = self.velocity_index   # update the canonical "where we are"
+        self.velocity_index = self._local_nearest(distances)
+        self._wp_idx = self.velocity_index   # canonical "where we are"
         return self.waypoints_world[self.velocity_index], self.velocities[self.velocity_index]
 
     def _get_waypoint(self, pose, target_velocity):
@@ -314,12 +319,27 @@ class StanleyAvoidance(Node):
             self.max_lookahead,
         )
 
-        indices_L = np.argsort(np.where(distances < dynamic_L, distances, -1))[::-1]
-
-        for i in indices_L:
-            if waypoints_car[i][0] > 0:
-                self.index = i
-                return waypoints_car[self.index], self.waypoints_world[self.index]
+        # [ADAPT-15] Restrict candidates to a local window around the
+        # last known wp_idx so this can't jump to the opposite side of
+        # the loop after the car drifts.
+        if self._wp_idx is not None:
+            n = len(self.waypoints_world)
+            w = self.waypoint_window
+            window_idx = np.array([(self._wp_idx + di) % n
+                                   for di in range(-w, w + 1)])
+            local_d = distances[window_idx]
+            order = np.argsort(np.where(local_d < dynamic_L, local_d, -1))[::-1]
+            for o in order:
+                i = window_idx[o]
+                if waypoints_car[i][0] > 0:
+                    self.index = int(i)
+                    return waypoints_car[self.index], self.waypoints_world[self.index]
+        else:
+            indices_L = np.argsort(np.where(distances < dynamic_L, distances, -1))[::-1]
+            for i in indices_L:
+                if waypoints_car[i][0] > 0:
+                    self.index = int(i)
+                    return waypoints_car[self.index], self.waypoints_world[self.index]
         return None, None
 
     def _path_blocked(self, max_distance, margin):
@@ -357,8 +377,8 @@ class StanleyAvoidance(Node):
         position = (pose.position.x, pose.position.y, 0)
         waypoints_car = self._transform_waypoints(self.waypoints_world, position, pose)
         distances = np.linalg.norm(waypoints_car, axis=1)
-        index = self._find_nearest_idx(waypoints_car, distances)
-        self._wp_idx = index  # keep canonical idx updated
+        index = self._local_nearest(distances)   # [ADAPT-15] local window
+        self._wp_idx = index
         return waypoints_car[index], self.waypoints_world[index], self.thetas[index], index
 
     def odom_callback(self, msg):
@@ -392,7 +412,7 @@ class StanleyAvoidance(Node):
                 # Flipping order also flips tangent direction, so theta += pi
                 self.thetas = (self.thetas[::-1] + math.pi
                                + math.pi) % (2 * math.pi) - math.pi
-                self._wp_idx = None  # reset, force global argmin on next find
+                self._wp_idx = None  # invalidate after reversal
                 self.get_logger().warn(
                     f"Path direction reversed at startup: car_yaw="
                     f"{math.degrees(curr_yaw):+.0f}°, path_yaw="
@@ -446,7 +466,8 @@ class StanleyAvoidance(Node):
         self.get_logger().info(
             f"AVOID target=({point[0]:+.2f},{point[1]:+.2f}) "
             f"cmd={math.degrees(angle):+.1f}° v={velocity:.2f} "
-            f"obs_dist={self.obstacle_distance:.2f}m",
+            f"obs_dist={self.obstacle_distance:.2f}m "
+            f"vel_wp={self.velocity_index} goal_wp={self.index}",
             throttle_duration_sec=0.3,
         )
         return angle, velocity
@@ -454,7 +475,7 @@ class StanleyAvoidance(Node):
     def drive_to_target_stanley(self):
         # [ADAPT-4] path_heading from yaml's stored theta (third return),
         # not derived from front/rear waypoint atan2 like upstream.
-        closest_wheelbase_front_point_car, _, path_heading, wp_idx = self._get_waypoint_stanley(
+        closest_wheelbase_front_point_car, _, path_heading, stanley_wp = self._get_waypoint_stanley(
             self.current_pose_wheelbase_front
         )
 
@@ -463,7 +484,13 @@ class StanleyAvoidance(Node):
             self.current_pose_wheelbase_front.position.x - self.current_pose.position.x,
         )
 
-        crosstrack_error = math.atan2(self.K_E * closest_wheelbase_front_point_car[1], self.target_velocity)
+        # [ADAPT-16] Add avoidance lateral offset to cte. Stanley follows
+        # a path PARALLEL to the original raceline, offset by `avoidance_offset`.
+        # The heading_error term below uses original path_heading, so the
+        # car's heading stays aligned with the original path direction.
+        y_lateral = closest_wheelbase_front_point_car[1]
+        y_effective = y_lateral + self.avoidance_offset
+        crosstrack_error = math.atan2(self.K_E * y_effective, self.target_velocity)
         heading_error = path_heading - current_heading
         # Wrap to [-pi, pi]
         heading_error = math.atan2(math.sin(heading_error), math.cos(heading_error))
@@ -475,9 +502,10 @@ class StanleyAvoidance(Node):
         velocity = self.target_velocity * self.velocity_percentage
 
         self.get_logger().info(
-            f"cte={closest_wheelbase_front_point_car[1]:+.2f}m "
+            f"cte={y_lateral:+.2f}m off={self.avoidance_offset:+.2f}m "
             f"head_err={math.degrees(heading_error / self.K_H):+.0f}° "
-            f"cmd={math.degrees(angle):+.0f}° v={velocity:.2f} wp={wp_idx}",
+            f"cmd={math.degrees(angle):+.0f}° v={velocity:.2f} "
+            f"stanley_wp={stanley_wp} vel_wp={self.velocity_index} goal_wp={self.index}",
             throttle_duration_sec=0.5,
         )
 
@@ -535,154 +563,87 @@ class StanleyAvoidance(Node):
             throttle_duration_sec=0.5,
         )
 
+        # ── [ADAPT-16] World-frame obstacle tracking + lateral offset ──
+        # If we've passed the obstacle in WORLD frame, target_offset → 0.
+        # If we have a confirmed detection, target_offset = ±avoidance_offset_m.
+        # Else target_offset stays at its current value (could be 0 or ramping).
+
+        if self.obstacle_world_xy is not None:
+            # Have a previously locked obstacle. Check if we've passed it.
+            wx, wy = self.obstacle_world_xy
+            quat = np.array([self.current_pose.orientation.x, self.current_pose.orientation.y,
+                             self.current_pose.orientation.z, self.current_pose.orientation.w])
+            inv = R.inv(R.from_quat(quat))
+            rel = inv.apply([wx - self.current_pose.position.x,
+                             wy - self.current_pose.position.y, 0.0])
+            obs_x_car = float(rel[0])
+            if obs_x_car < self.obstacle_passed_thresh:
+                self.get_logger().info(
+                    f"  PASSED obstacle (obs_x_car={obs_x_car:+.2f}m) — ramping offset back"
+                )
+                self.target_offset = 0.0
+                self.obstacle_world_xy = None
+                self.obstacle_side_lock = None
+                self.obstacle_block_counter = 0
+
         if blocked:
             self.obstacle_distance = (current_pos[0] - block_info['obstacle_cell'][0]) / self.CELLS_PER_METER
             self.obstacle_block_counter += 1
             self.obstacle_clear_counter = 0
 
-            # Require N consecutive blocked ticks before committing to
-            # avoidance. Single-tick spikes (lidar noise, wall clipping
-            # MARGIN edge briefly) shouldn't lock the car into a swerve.
             if self.obstacle_side_lock is None and self.obstacle_block_counter < self.obstacle_block_threshold:
-                # Detected but not yet confirmed — skip avoidance this tick
-                target = None
+                pass  # not yet confirmed
             else:
                 self.obstacle_detected = True
 
-                # [ADAPT-11] Shift base = path waypoint just past the
-                # obstacle (a point ON the path, not in the car's lateral
-                # frame). [ADAPT-14] Shift PERPENDICULAR to the path
-                # direction at this point, so the shifted target sits on
-                # a parallel-to-path line — keeps the swerve aligned with
-                # the actual raceline heading instead of with the car's
-                # current heading.
-                shift_base = np.array(block_info['next_cell'])
-                di_path = float(block_info['next_cell'][0] - block_info['prev_cell'][0])
-                dj_path = float(block_info['next_cell'][1] - block_info['prev_cell'][1])
-                path_mag = math.sqrt(di_path * di_path + dj_path * dj_path)
-                if path_mag > 0.01:
-                    # Unit perpendicular LEFT relative to path direction (in grid)
-                    perp_i = -dj_path / path_mag
-                    perp_j = -di_path / path_mag
-                else:
-                    perp_i, perp_j = 0.0, 1.0  # fallback: car-frame LEFT
-
-                # [ADAPT-6] Side detection from actual obstacle cell relative
-                # to the blocked path segment.
+                # [ADAPT-6] Side detection from actual obstacle cell.
                 measured_on_right = self._obstacle_on_right_of_path(
                     block_info['prev_cell'],
                     block_info['next_cell'],
                     block_info['obstacle_cell'],
                 )
 
-                # Lock side on FIRST confirmed detection and HOLD it.
+                # Lock side and STORE obstacle's WORLD position on first confirmed detection
                 if self.obstacle_side_lock is None:
                     self.obstacle_side_lock = measured_on_right
+                    # Transform obstacle_cell → car frame → world frame
+                    obs_car_xy = self._from_grid(block_info['obstacle_cell'])
+                    quat = np.array([self.current_pose.orientation.x, self.current_pose.orientation.y,
+                                     self.current_pose.orientation.z, self.current_pose.orientation.w])
+                    rotw = R.from_quat(quat)
+                    world_offset = rotw.apply([obs_car_xy[0], obs_car_xy[1], 0.0])
+                    self.obstacle_world_xy = (
+                        self.current_pose.position.x + float(world_offset[0]),
+                        self.current_pose.position.y + float(world_offset[1]),
+                    )
                     self.get_logger().info(
-                        f"  LOCKED obstacle_side="
-                        f"{'RIGHT' if measured_on_right else 'LEFT'} "
+                        f"  LOCKED obstacle_side={'RIGHT' if measured_on_right else 'LEFT'} "
                         f"obstacle_cell={block_info['obstacle_cell']} "
+                        f"obstacle_world=({self.obstacle_world_xy[0]:+.2f},{self.obstacle_world_xy[1]:+.2f}) "
                         f"(after {self.obstacle_block_counter} confirmed ticks)"
                     )
-                obstacle_on_right = self.obstacle_side_lock
 
-            # Safe side only — LARGEST shift first so the car commits to a
-            # real swerve immediately. Area-check rejects shifts that would
-            # land in walls, so we naturally degrade to smaller shifts in
-                # tight sections.
-                safe_sign = +1 if obstacle_on_right else -1
-                shifts = [safe_sign * mag for mag in range(self.max_shift_cells, 0, -1)]
-
-                self.get_logger().info(
-                    f"  obstacle_side={'RIGHT' if obstacle_on_right else 'LEFT'} "
-                    f"shifts={shifts}",
-                    throttle_duration_sec=0.3,
-                )
-
-                def _shift_target_valid(start, goal, chord_margin):
-                    if self._check_area(goal, MARGIN):
-                        return False
-                    if self._check_collision(start, goal, margin=chord_margin):
-                        return False
-                    return True
-
-                def _apply_shift(base, shift):
-                    """[ADAPT-14] Shift the base point PERPENDICULAR to path
-                    direction by `shift` cells. Returns (i, j) tuple."""
-                    return (int(round(base[0] + shift * perp_i)),
-                            int(round(base[1] + shift * perp_j)))
-
-                found = False
-                for shift in shifts:
-                    new_goal = _apply_shift(shift_base, shift)
-                    if _shift_target_valid(current_pos, new_goal, MARGIN):
-                        target = self._from_grid(new_goal)
-                        found = True
-                        break
-
-                if not found:
-                    middle_grid_point = ((current_pos[0] + shift_base[0]) // 2,
-                                         (current_pos[1] + shift_base[1]) // 2)
-                    for shift in shifts:
-                        new_goal = _apply_shift(middle_grid_point, shift)
-                        if _shift_target_valid(current_pos, new_goal, MARGIN):
-                            target = self._from_grid(new_goal)
-                            found = True
-                            break
-
-                if not found:
-                    middle_grid_point = ((current_pos[0] + shift_base[0]) // 2,
-                                         (current_pos[1] + shift_base[1]) // 2)
-                    for shift in shifts:
-                        new_goal = _apply_shift(middle_grid_point, shift)
-                        if (not self._check_area(new_goal, MARGIN)
-                                and not self._check_collision_loose(current_pos, new_goal, margin=MARGIN)):
-                            target = self._from_grid(new_goal)
-                            found = True
-                            break
-
-                if target is not None:
-                    self.last_avoid_target = target
+                # Set target_offset (signed). Obstacle on RIGHT → shift LEFT → +offset.
+                self.target_offset = (+self.avoidance_offset_m
+                                      if self.obstacle_side_lock
+                                      else -self.avoidance_offset_m)
         else:
             self.obstacle_detected = False
             self.obstacle_distance = 999.0
-            self.obstacle_block_counter = 0   # reset confirm-counter on clear
+            self.obstacle_block_counter = 0
             self.obstacle_clear_counter += 1
-            if (self.obstacle_side_lock is not None
-                    and self.obstacle_clear_counter >= self.obstacle_clear_threshold):
-                self.get_logger().info(
-                    f"  RELEASED obstacle_side lock (clear {self.obstacle_clear_counter} ticks)"
-                )
-                self.obstacle_side_lock = None
-                self.last_avoid_target = None
 
-        # Decide which controller drives this tick. HYSTERESIS: stay in
-        # avoidance mode while the lock is held, even when the current
-        # tick reports path_blocked=False. This prevents oscillation when
-        # the path-walker flickers around an obstacle at the margin edge.
-        in_avoidance = (target is not None) or (self.obstacle_side_lock is not None)
-
-        if in_avoidance:
-            # If this tick didn't compute a fresh target (path was clear
-            # momentarily) but we're still in the avoidance lock, reuse
-            # the last computed target.
-            active_target = target if target is not None else self.last_avoid_target
-            if active_target is not None:
-                self._publish_target(msg.header.frame_id, msg.header.stamp, active_target, avoiding=True)
-                self.drive_to_target(active_target, self.K_p_obstacle)
-            elif self.obstacle_detected:
-                # Detected but no valid target found anywhere — stop
-                drive_msg = AckermannDriveStamped()
-                drive_msg.drive.speed = 0.0
-                drive_msg.drive.steering_angle = 0.0
-                self.drive_pub.publish(drive_msg)
-            else:
-                # Lock held but no target ever computed (shouldn't happen)
-                self._publish_target(msg.header.frame_id, msg.header.stamp, self.goal_pos, avoiding=False)
-                self.drive_to_target_stanley()
+        # [ADAPT-16] Ramp current offset toward target_offset (smooth transition)
+        delta = self.target_offset - self.avoidance_offset
+        if abs(delta) <= self.offset_ramp_per_tick:
+            self.avoidance_offset = self.target_offset
         else:
-            self._publish_target(msg.header.frame_id, msg.header.stamp, self.goal_pos, avoiding=False)
-            self.drive_to_target_stanley()
+            self.avoidance_offset += math.copysign(self.offset_ramp_per_tick, delta)
+
+        # ALWAYS run stanley — the avoidance is just an offset on cte.
+        self._publish_target(msg.header.frame_id, msg.header.stamp,
+                             self.goal_pos, avoiding=(abs(self.avoidance_offset) > 0.01))
+        self.drive_to_target_stanley()
 
     def _to_grid(self, x, y):
         i = int(x * -self.CELLS_PER_METER + (self.grid_height - 1))
