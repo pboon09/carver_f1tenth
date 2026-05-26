@@ -237,8 +237,10 @@ class StanleyAvoidance(Node):
     def _path_blocked(self, max_distance, margin):
         """[ADAPT-5] Path-walking obstacle detection.
 
-        Walk along path waypoints from car position up to max_distance
-        forward (along the path), checking each short segment for collision.
+        Walk along path waypoints IN PATH-INDEX ORDER from the car's
+        tracked position, up to max_distance of accumulated arc length.
+        Walking by index (not by straight-line distance) prevents chord
+        crossings through internal walls on closed-loop paths.
 
         Returns (blocked, blocking_info_or_None) where blocking_info is:
             {'prev_cell': (i,j),  # segment start (closer to car)
@@ -247,22 +249,42 @@ class StanleyAvoidance(Node):
         """
         position = (self.current_pose.position.x, self.current_pose.position.y, 0)
         waypoints_car = self._transform_waypoints(self.waypoints_world, position, self.current_pose)
-        distances = np.linalg.norm(waypoints_car, axis=1)
+        N = len(waypoints_car)
 
-        forward = (waypoints_car[:, 0] > 0.05) & (distances < max_distance)
-        idx = np.where(forward)[0]
-        if idx.size == 0:
-            return False, None
-        idx = idx[np.argsort(distances[idx])]
+        # pick starting waypoint in path order: advance from _wp_idx until forward in car frame
+        if self._wp_idx is not None:
+            start = self._wp_idx
+            for _ in range(N):
+                if waypoints_car[start, 0] > 0.05:
+                    break
+                start = (start + 1) % N
+            else:
+                return False, None
+        else:
+            forward_mask = waypoints_car[:, 0] > 0.05
+            if not forward_mask.any():
+                return False, None
+            distances = np.linalg.norm(waypoints_car, axis=1)
+            cand = np.where(forward_mask)[0]
+            start = int(cand[np.argmin(distances[cand])])
 
         prev_cell = self._to_grid(0.0, 0.0)
-        for i in idx:
-            wp = waypoints_car[i]
+        prev_world = np.array([self.current_pose.position.x, self.current_pose.position.y])
+        cumulative = 0.0
+        idx = start
+        for _ in range(N):
+            wp_world = self.waypoints_world[idx][:2]
+            cumulative += float(np.linalg.norm(wp_world - prev_world))
+            if cumulative > max_distance:
+                break
+            wp = waypoints_car[idx]
             cell = self._to_grid(float(wp[0]), float(wp[1]))
             collision, obs_cell = self._check_collision_with_obstacle(prev_cell, cell, margin=margin)
             if collision:
                 return True, {'prev_cell': prev_cell, 'next_cell': cell, 'obstacle_cell': obs_cell}
             prev_cell = cell
+            prev_world = wp_world
+            idx = (idx + 1) % N
         return False, None
 
     def _get_waypoint_stanley(self, pose):
