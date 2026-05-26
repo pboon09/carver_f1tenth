@@ -2,10 +2,12 @@
 
 import math
 import os
+import signal
+import time
 
 import numpy as np
 import yaml
-from scipy import signal
+from scipy import signal as scipy_signal
 from scipy.spatial.transform import Rotation as R
 
 import rclpy
@@ -25,24 +27,26 @@ class StanleyAvoidance(Node):
 
         self.declare_parameter("waypoints_path", "")
         self.declare_parameter("scan_topic", "/scan")
-        self.declare_parameter("odom_topic", "/ego_racecar/odom")
+        self.declare_parameter("odom_topic", "dedicate_odom")
         self.declare_parameter("drive_topic", "/drive")
         self.declare_parameter("velocity", 0.5)
-        self.declare_parameter("K_E", 2.0)
-        self.declare_parameter("K_H", 1.5)
+        self.declare_parameter("K_E", 0.7)
+        self.declare_parameter("K_H", 0.5)
         self.declare_parameter("K_p", 0.5)
         self.declare_parameter("K_p_obstacle", 0.8)
-        self.declare_parameter("min_lookahead", 1.0)
-        self.declare_parameter("max_lookahead", 3.0)
-        self.declare_parameter("min_lookahead_speed", 3.0)
-        self.declare_parameter("max_lookahead_speed", 6.0)
-        self.declare_parameter("velocity_percentage", 0.5)
-        self.declare_parameter("velocity_min", 0.3)
-        self.declare_parameter("velocity_max", 0.5)
-        self.declare_parameter("steering_limit", 25.0)
+        self.declare_parameter("min_lookahead", 0.6)
+        self.declare_parameter("max_lookahead", 1.5)
+        self.declare_parameter("min_lookahead_speed", 0.5)
+        self.declare_parameter("max_lookahead_speed", 0.7)
+        self.declare_parameter("velocity_percentage", 1.0)
+        self.declare_parameter("velocity_min", 0.5)
+        self.declare_parameter("velocity_max", 0.7)
+        self.declare_parameter("steering_limit", 0.4189)
         self.declare_parameter("grid_width_meters", 6.0)
         self.declare_parameter("cells_per_meter", 10)
         self.declare_parameter("wheelbase", 0.33)
+        self.declare_parameter("estop_dist", 0.30)
+        self.declare_parameter("estop_half_arc_deg", 15.0)
 
         self.scan_topic = str(self.get_parameter("scan_topic").value)
         self.odom_topic = str(self.get_parameter("odom_topic").value)
@@ -59,6 +63,8 @@ class StanleyAvoidance(Node):
         self.CELLS_PER_METER = int(self.get_parameter("cells_per_meter").value)
         self.wheelbase = float(self.get_parameter("wheelbase").value)
         self.base_velocity = float(self.get_parameter("velocity").value)
+        self.estop_dist = float(self.get_parameter("estop_dist").value)
+        self.estop_half_arc = math.radians(float(self.get_parameter("estop_half_arc_deg").value))
 
         self.min_lookahead = float(self.get_parameter("min_lookahead").value)
         self.max_lookahead = float(self.get_parameter("max_lookahead").value)
@@ -94,6 +100,7 @@ class StanleyAvoidance(Node):
         self.velocity_index = 0
         self.index = 0
         self.odom_frame = "map"
+        self._direction_checked = False
 
     def _load_waypoints(self):
         waypoints_path = str(self.get_parameter("waypoints_path").value)
@@ -110,6 +117,7 @@ class StanleyAvoidance(Node):
         wp_list = data["waypoints"]
         points = np.array([[wp["x"], wp["y"], 0.0] for wp in wp_list])
         velocities = np.full(len(wp_list), self.base_velocity)
+        self.thetas = np.array([wp.get("theta", 0.0) for wp in wp_list])
 
         return points, velocities
 
@@ -157,7 +165,7 @@ class StanleyAvoidance(Node):
         waypoints_car = self._transform_waypoints(self.waypoints_world, position, pose)
         distances = np.linalg.norm(waypoints_car, axis=1)
         index = np.argmin(distances)
-        return waypoints_car[index], self.waypoints_world[index]
+        return waypoints_car[index], self.waypoints_world[index], self.thetas[index]
 
     def odom_callback(self, msg):
         self.current_pose = msg.pose.pose
@@ -169,6 +177,37 @@ class StanleyAvoidance(Node):
             self.current_pose.orientation.z,
             self.current_pose.orientation.w,
         ])
+
+        # One-shot direction check: if the car is facing opposite the path
+        # loop direction at startup, flip the waypoint order so theta and
+        # the closest-waypoint progression align with travel direction.
+        if not self._direction_checked:
+            curr_yaw = R.from_quat(current_pose_quaternion).as_euler("xyz")[2]
+            curr_pos = np.array([self.current_pose.position.x,
+                                 self.current_pose.position.y, 0.0])
+            nearest = int(np.argmin(np.linalg.norm(self.waypoints_world - curr_pos, axis=1)))
+            nxt = (nearest + 1) % len(self.waypoints_world)
+            pv = self.waypoints_world[nxt] - self.waypoints_world[nearest]
+            path_yaw = math.atan2(pv[1], pv[0])
+            yaw_diff = math.atan2(math.sin(curr_yaw - path_yaw),
+                                  math.cos(curr_yaw - path_yaw))
+            if abs(yaw_diff) > math.pi / 2:
+                self.waypoints_world = self.waypoints_world[::-1]
+                self.velocities = self.velocities[::-1]
+                # Flipping order also flips tangent direction, so theta += pi
+                self.thetas = (self.thetas[::-1] + math.pi
+                               + math.pi) % (2 * math.pi) - math.pi
+                self.get_logger().warn(
+                    f"Path direction reversed at startup: car_yaw="
+                    f"{math.degrees(curr_yaw):+.0f}°, path_yaw="
+                    f"{math.degrees(path_yaw):+.0f}° "
+                    f"(Δ={math.degrees(yaw_diff):+.0f}°)"
+                )
+            else:
+                self.get_logger().info(
+                    f"Path direction matches car heading (Δ={math.degrees(yaw_diff):+.0f}°)"
+                )
+            self._direction_checked = True
 
         self.current_pose_wheelbase_front = Pose()
         current_pose_xyz = R.from_quat(current_pose_quaternion).apply((self.wheelbase, 0, 0)) + (
@@ -194,7 +233,7 @@ class StanleyAvoidance(Node):
         L = np.linalg.norm(point)
         y = point[1]
         angle = K_p * (2 * y) / (L ** 2)
-        angle = np.clip(angle, -np.radians(self.steering_limit), np.radians(self.steering_limit))
+        angle = np.clip(angle, -self.steering_limit, self.steering_limit)
 
         if self.obstacle_detected and self.velocity_percentage > 0.0:
             if abs(np.degrees(angle)) < 10.0:
@@ -213,36 +252,32 @@ class StanleyAvoidance(Node):
         return angle, velocity
 
     def drive_to_target_stanley(self):
-        closest_wheelbase_front_point_car, closest_wheelbase_front_point_world = self._get_waypoint_stanley(
+        closest_wheelbase_front_point_car, _, path_heading = self._get_waypoint_stanley(
             self.current_pose_wheelbase_front
         )
 
-        path_heading = math.atan2(
-            closest_wheelbase_front_point_world[1] - self.closest_wheelbase_rear_point[1],
-            closest_wheelbase_front_point_world[0] - self.closest_wheelbase_rear_point[0],
-        )
         current_heading = math.atan2(
             self.current_pose_wheelbase_front.position.y - self.current_pose.position.y,
             self.current_pose_wheelbase_front.position.x - self.current_pose.position.x,
         )
 
-        if current_heading < 0:
-            current_heading += 2 * math.pi
-        if path_heading < 0:
-            path_heading += 2 * math.pi
-
         crosstrack_error = math.atan2(self.K_E * closest_wheelbase_front_point_car[1], self.target_velocity)
         heading_error = path_heading - current_heading
-        if heading_error > math.pi:
-            heading_error -= 2 * math.pi
-        elif heading_error < -math.pi:
-            heading_error += 2 * math.pi
+        # Wrap to [-pi, pi]
+        heading_error = math.atan2(math.sin(heading_error), math.cos(heading_error))
         heading_error *= self.K_H
 
         angle = heading_error + crosstrack_error
-        angle = np.clip(angle, -np.radians(self.steering_limit), np.radians(self.steering_limit))
+        angle = np.clip(angle, -self.steering_limit, self.steering_limit)
 
         velocity = self.target_velocity * self.velocity_percentage
+
+        self.get_logger().info(
+            f"cte={closest_wheelbase_front_point_car[1]:+.2f}m "
+            f"head_err={math.degrees(heading_error / self.K_H):+.0f}° "
+            f"cmd={math.degrees(angle):+.0f}° v={velocity:.2f}",
+            throttle_duration_sec=0.5,
+        )
 
         drive_msg = AckermannDriveStamped()
         drive_msg.drive.speed = velocity
@@ -252,6 +287,23 @@ class StanleyAvoidance(Node):
 
     def scan_callback(self, msg):
         if self.current_pose is None or self.goal_pos is None:
+            return
+
+        # ── E-STOP: hard cutoff if anything is too close directly in front ──
+        ranges = np.asarray(msg.ranges, dtype=float)
+        angles = msg.angle_min + np.arange(len(ranges)) * msg.angle_increment
+        forward = np.abs(np.arctan2(np.sin(angles), np.cos(angles))) < self.estop_half_arc
+        rng = ranges[forward]
+        rng = rng[np.isfinite(rng) & (rng > 0.05)]
+        if rng.size > 0 and rng.min() < self.estop_dist:
+            stop = AckermannDriveStamped()
+            stop.drive.speed = 0.0
+            stop.drive.steering_angle = 0.0
+            self.drive_pub.publish(stop)
+            self.get_logger().warn(
+                f"E-STOP: obstacle at {rng.min():.2f}m within ±{math.degrees(self.estop_half_arc):.0f}° forward",
+                throttle_duration_sec=1.0,
+            )
             return
 
         self._populate_grid(msg.ranges, msg.angle_increment, msg.angle_min)
@@ -336,7 +388,7 @@ class StanleyAvoidance(Node):
 
     def _convolve_grid(self):
         kernel = np.ones((2, 2))
-        self.occupancy_grid = signal.convolve2d(
+        self.occupancy_grid = scipy_signal.convolve2d(
             self.occupancy_grid.astype("int"), kernel.astype("int"),
             boundary="symm", mode="same",
         )
@@ -439,12 +491,51 @@ class StanleyAvoidance(Node):
         self.target_pub.publish(marker)
 
 
+def _send_stop(node):
+    """Publish speed=0, steering=0 several times so VESC + servo actually receive it."""
+    msg = AckermannDriveStamped()
+    msg.drive.speed = 0.0
+    msg.drive.steering_angle = 0.0
+    for _ in range(5):
+        node.drive_pub.publish(msg)
+        time.sleep(0.02)
+
+
 def main(args=None):
     rclpy.init(args=args)
     node = StanleyAvoidance()
-    rclpy.spin(node)
-    node.destroy_node()
-    rclpy.shutdown()
+
+    def _on_term(signum, _frame):
+        try:
+            _send_stop(node)
+        except Exception:
+            pass
+        if signum == signal.SIGTSTP:
+            signal.signal(signal.SIGTSTP, signal.SIG_DFL)
+            os.kill(os.getpid(), signal.SIGTSTP)
+        else:
+            rclpy.try_shutdown()
+
+    # Override rclpy's default handlers AFTER rclpy.init() so we run on Ctrl+C
+    signal.signal(signal.SIGINT,  _on_term)
+    signal.signal(signal.SIGTERM, _on_term)
+    signal.signal(signal.SIGTSTP, _on_term)
+
+    try:
+        rclpy.spin(node)
+    except KeyboardInterrupt:
+        pass
+    finally:
+        try:
+            _send_stop(node)
+        except Exception:
+            pass
+        try:
+            node.destroy_node()
+        except Exception:
+            pass
+        if rclpy.ok():
+            rclpy.shutdown()
 
 
 if __name__ == "__main__":

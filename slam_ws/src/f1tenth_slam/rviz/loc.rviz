@@ -247,9 +247,26 @@ Visualization Manager:
         Value: /imu/data
       Value: false
       fixed_frame_orientation: true
-    - Class: rviz_default_plugins/Path
-      Name: Trajectory
+    - Alpha: 1
+      Buffer Length: 1
+      Class: rviz_default_plugins/Path
+      Color: 25; 200; 50
       Enabled: true
+      Head Diameter: 0.30000001192092896
+      Head Length: 0.20000000298023224
+      Length: 0.30000001192092896
+      Line Style: Lines
+      Line Width: 0.029999999329447746
+      Name: Trajectory
+      Offset:
+        X: 0
+        Y: 0
+        Z: 0
+      Pose Color: 255; 85; 255
+      Pose Style: None
+      Radius: 0.029999999329447746
+      Shaft Diameter: 0.10000000149011612
+      Shaft Length: 0.10000000149011612
       Topic:
         Depth: 5
         Durability Policy: Volatile
@@ -257,44 +274,36 @@ Visualization Manager:
         History Policy: Keep Last
         Reliability Policy: Reliable
         Value: /trajectory
-      Color: 25; 200; 50
-      Alpha: 1.0
-      Line Style: Lines
-      Line Width: 0.03
-      Buffer Length: 1
-      Offset:
-        X: 0
-        Y: 0
-        Z: 0
-      Pose Style: None
       Value: true
     - Class: rviz_default_plugins/Marker
-      Name: PurePursuit Path
       Enabled: true
+      Name: PurePursuit Path
       Namespaces:
         {}
       Topic:
         Depth: 5
         Durability Policy: Volatile
+        Filter size: 10
         History Policy: Keep Last
         Reliability Policy: Reliable
         Value: /pure_pursuit/path
       Value: true
     - Class: rviz_default_plugins/Marker
-      Name: PurePursuit Target
       Enabled: true
+      Name: PurePursuit Target
       Namespaces:
         {}
       Topic:
         Depth: 5
         Durability Policy: Volatile
+        Filter size: 10
         History Policy: Keep Last
         Reliability Policy: Reliable
         Value: /pure_pursuit/target
       Value: true
     - Class: rviz_default_plugins/MarkerArray
-      Name: Lattice Candidates
       Enabled: true
+      Name: Lattice Candidates
       Namespaces:
         {}
       Topic:
@@ -305,20 +314,21 @@ Visualization Manager:
         Value: /lattice/candidates
       Value: true
     - Class: rviz_default_plugins/Marker
-      Name: Lattice Selected
       Enabled: true
+      Name: Lattice Selected
       Namespaces:
         {}
       Topic:
         Depth: 5
         Durability Policy: Volatile
+        Filter size: 10
         History Policy: Keep Last
         Reliability Policy: Reliable
         Value: /lattice/selected
       Value: true
     - Class: rviz_default_plugins/MarkerArray
-      Name: Lattice Obstacles
       Enabled: true
+      Name: Lattice Obstacles
       Namespaces:
         {}
       Topic:
@@ -327,6 +337,47 @@ Visualization Manager:
         History Policy: Keep Last
         Reliability Policy: Reliable
         Value: /lattice/obstacles
+      Value: true
+    - Alpha: 1
+      Buffer Length: 1
+      Class: rviz_default_plugins/Path
+      Color: 25; 255; 0
+      Enabled: true
+      Head Diameter: 0.30000001192092896
+      Head Length: 0.20000000298023224
+      Length: 0.30000001192092896
+      Line Style: Lines
+      Line Width: 0.029999999329447746
+      Name: Path
+      Offset:
+        X: 0
+        Y: 0
+        Z: 0
+      Pose Color: 255; 85; 255
+      Pose Style: None
+      Radius: 0.029999999329447746
+      Shaft Diameter: 0.10000000149011612
+      Shaft Length: 0.10000000149011612
+      Topic:
+        Depth: 5
+        Durability Policy: Volatile
+        Filter size: 10
+        History Policy: Keep Last
+        Reliability Policy: Reliable
+        Value: /viz/path
+      Value: true
+    - Class: rviz_default_plugins/Marker
+      Enabled: true
+      Name: Marker
+      Namespaces:
+        "": true
+      Topic:
+        Depth: 5
+        Durability Policy: Volatile
+        Filter size: 10
+        History Policy: Keep Last
+        Reliability Policy: Reliable
+        Value: /viz/drive_target
       Value: true
   Enabled: true
   Global Options:
@@ -356,7 +407,7 @@ Visualization Manager:
   Views:
     Current:
       Class: rviz_default_plugins/Orbit
-      Distance: 15
+      Distance: 4.586525917053223
       Enable Stereo Rendering:
         Stereo Eye Separation: 0.05999999865889549
         Stereo Focal Distance: 1
@@ -382,9 +433,9 @@ Window Geometry:
   Height: 800
   Hide Left Dock: false
   Hide Right Dock: false
-  QMainWindow State: 000000ff00000000fd0000000100000000000001c9000002c6fc0200000002fb000000100044006900730070006c006100790073010000003d000001ab000000c900fffffffb0000000a0056006900650077007301000001ee00000115000000a400ffffff000002e1000002c600000004000000040000000800000008fc0000000100000002000000010000000a0054006f006f006c00730100000000ffffffff0000000000000000
+  QMainWindow State: 000000ff00000000fd0000000100000000000001c9000002c6fc0200000002fb000000100044006900730070006c006100790073010000003d000001ab000000c900fffffffb0000000a0056006900650077007301000001ee00000115000000a400ffffff000002da000002c600000004000000040000000800000008fc0000000100000002000000010000000a0054006f006f006c00730100000000ffffffff0000000000000000
   Views:
     collapsed: false
-  Width: 1200
-  X: 99
+  Width: 1193
+  X: 106
   Y: 131
