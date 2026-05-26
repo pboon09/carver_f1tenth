@@ -12,10 +12,12 @@ from scipy.spatial.transform import Rotation as R
 
 import rclpy
 from rclpy.node import Node
-from rclpy.qos import qos_profile_sensor_data
+from rclpy.qos import (qos_profile_sensor_data, QoSProfile,
+                       DurabilityPolicy, ReliabilityPolicy)
 from sensor_msgs.msg import LaserScan
 from nav_msgs.msg import Odometry, OccupancyGrid
-from geometry_msgs.msg import Pose
+from geometry_msgs.msg import Pose, PoseWithCovarianceStamped
+from std_msgs.msg import Bool
 from visualization_msgs.msg import Marker
 from ackermann_msgs.msg import AckermannDriveStamped
 from ament_index_python.packages import get_package_share_directory
@@ -27,7 +29,7 @@ class StanleyAvoidance(Node):
 
         self.declare_parameter("waypoints_path", "")
         self.declare_parameter("scan_topic", "/scan")
-        self.declare_parameter("odom_topic", "dedicate_odom")
+        self.declare_parameter("odom_topic", "/dedicate_odom")
         self.declare_parameter("drive_topic", "/drive")
         self.declare_parameter("velocity", 0.5)
         self.declare_parameter("K_E", 0.5)
@@ -55,6 +57,16 @@ class StanleyAvoidance(Node):
         self.declare_parameter("safety_buffer", 0.0)
         self.declare_parameter("obstacle_detect_lookahead", 2.5)  # [ADAPT-5]
 
+        # ── One-lap auto-stop (mirrors pure_pursuit / lattice). Set the
+        # 2D Pose Estimate in RViz (publishes /initialpose) to mark a lap
+        # start, or just rely on the first odom auto-record. After the car
+        # has gone >lap_far_threshold m away and returned within
+        # lap_close_threshold m, wait lap_dwell_seconds, then force stop.
+        self.declare_parameter("lap_topic",            "/initialpose")
+        self.declare_parameter("lap_far_threshold",    2.0)
+        self.declare_parameter("lap_close_threshold",  0.6)
+        self.declare_parameter("lap_dwell_seconds",    3.0)
+
         self.scan_topic = str(self.get_parameter("scan_topic").value)
         self.odom_topic = str(self.get_parameter("odom_topic").value)
         self.drive_topic = str(self.get_parameter("drive_topic").value)
@@ -80,6 +92,16 @@ class StanleyAvoidance(Node):
         self.obstacle_detect_lookahead = float(self.get_parameter("obstacle_detect_lookahead").value)
         self.inflate_radius = self.car_half_width + self.safety_buffer
 
+        # Lap-stop state (same scheme as pure_pursuit / lattice).
+        self.lap_topic           = str(self.get_parameter("lap_topic").value)
+        self.lap_far_threshold   = float(self.get_parameter("lap_far_threshold").value)
+        self.lap_close_threshold = float(self.get_parameter("lap_close_threshold").value)
+        self.lap_dwell_seconds   = float(self.get_parameter("lap_dwell_seconds").value)
+        self.lap_start           = None     # np.ndarray when set
+        self.lap_far             = False
+        self.lap_done            = False
+        self.lap_complete_at     = None
+
         self.min_lookahead = float(self.get_parameter("min_lookahead").value)
         self.max_lookahead = float(self.get_parameter("max_lookahead").value)
         self.min_lookahead_speed = float(self.get_parameter("min_lookahead_speed").value)
@@ -92,6 +114,32 @@ class StanleyAvoidance(Node):
         self.odom_sub = self.create_subscription(Odometry, self.odom_topic, self.odom_callback, 1)
         # /scan is BEST_EFFORT — QoS must match or subscription drops everything.
         self.scan_sub = self.create_subscription(LaserScan, self.scan_topic, self.scan_callback, qos_profile_sensor_data)
+        # External pause flag from the launcher (matches pure_pursuit + lattice).
+        # While paused, drive callbacks override commanded speed to 0; path
+        # markers keep streaming so RViz still shows the planned line.
+        self.paused = False
+        pause_qos = QoSProfile(
+            depth=1,
+            durability=DurabilityPolicy.TRANSIENT_LOCAL,
+            reliability=ReliabilityPolicy.RELIABLE,
+        )
+        self.pause_sub = self.create_subscription(
+            Bool, "/controller_pause", self._pause_cb, pause_qos
+        )
+        # /initialpose for the lap-stop detector (RViz 2D Pose Estimate).
+        # If the user never publishes, the first odom message auto-records
+        # the start point — see odom_callback below.
+        if self.lap_far_threshold > 0.0:
+            self.lap_sub = self.create_subscription(
+                PoseWithCovarianceStamped, self.lap_topic,
+                self._lap_cb, 1
+            )
+            self.get_logger().info(
+                f"lap stop: set start with RViz '2D Pose Estimate' on "
+                f"{self.lap_topic} (need to travel >{self.lap_far_threshold:.1f} m "
+                f"away, return within {self.lap_close_threshold:.1f} m, "
+                f"then {self.lap_dwell_seconds:.1f} s grace → STOP)"
+            )
         self.drive_pub = self.create_publisher(AckermannDriveStamped, self.drive_topic, 10)
         self.target_pub = self.create_publisher(Marker, "/viz/drive_target", 10)
         self.grid_pub = self.create_publisher(OccupancyGrid, "/occupancy_grid", 10)
@@ -295,9 +343,66 @@ class StanleyAvoidance(Node):
         self._wp_idx = index
         return waypoints_car[index], self.waypoints_world[index], self.thetas[index], index
 
+    def _pause_cb(self, msg: Bool):
+        # External pause from the launcher button. While True, the drive
+        # publishes below force speed=0. Path/marker publishes keep running.
+        if self.paused != msg.data:
+            self.get_logger().info(f"pause = {msg.data}")
+        self.paused = bool(msg.data)
+
+    def _lap_cb(self, msg: PoseWithCovarianceStamped):
+        p = msg.pose.pose.position
+        self.lap_start = np.array([p.x, p.y])
+        self.lap_far = False
+        self.lap_done = False
+        self.lap_complete_at = None
+        self.get_logger().info(
+            f"lap start ← ({p.x:+.2f}, {p.y:+.2f})  "
+            f"(need: travel >{self.lap_far_threshold:.1f} m away, "
+            f"return within {self.lap_close_threshold:.1f} m, "
+            f"then {self.lap_dwell_seconds:.1f} s grace → STOP)"
+        )
+
+    def _update_lap_state(self, curr_pos):
+        """Auto-record lap start on first odom message, then run the
+        far-then-close detector with a grace-period overshoot."""
+        if self.lap_start is None and self.lap_far_threshold > 0.0:
+            self.lap_start = np.asarray(curr_pos, dtype=float)
+            self.get_logger().info(
+                f"lap start (auto) ← ({curr_pos[0]:+.2f}, {curr_pos[1]:+.2f})  "
+                f"— set 2D Pose Estimate in RViz to override"
+            )
+            return
+        if self.lap_start is None or self.lap_done:
+            return
+        d = float(np.linalg.norm(np.asarray(curr_pos) - self.lap_start))
+        if not self.lap_far and d > self.lap_far_threshold:
+            self.lap_far = True
+            self.get_logger().info(
+                f"lap: passed far threshold (d={d:.2f} m), watching for return"
+            )
+        elif self.lap_far and self.lap_complete_at is None \
+                and d < self.lap_close_threshold:
+            self.lap_complete_at = self.get_clock().now()
+            self.get_logger().info(
+                f"lap: returned within {d:.2f} m of start — "
+                f"stopping in {self.lap_dwell_seconds:.1f} s"
+            )
+        elif self.lap_complete_at is not None:
+            elapsed = (self.get_clock().now()
+                       - self.lap_complete_at).nanoseconds / 1e9
+            if elapsed >= self.lap_dwell_seconds:
+                self.lap_done = True
+                self.get_logger().warn(
+                    f"LAP COMPLETE — stopping "
+                    f"(grace {elapsed:.1f} s after close detect)"
+                )
+
     def odom_callback(self, msg):
         self.current_pose = msg.pose.pose
         self.odom_frame = msg.header.frame_id
+        self._update_lap_state(
+            (msg.pose.pose.position.x, msg.pose.pose.position.y))
 
         current_pose_quaternion = np.array([
             self.current_pose.orientation.x,
@@ -364,6 +469,8 @@ class StanleyAvoidance(Node):
         angle = np.clip(angle, -self.avoidance_steer_limit, self.avoidance_steer_limit)
         # [ADAPT-7] velocity = cruise during avoidance (e-stop is the safety floor)
         velocity = self.target_velocity * self.velocity_percentage
+        if self.paused or self.lap_done:
+            velocity = 0.0
 
         drive_msg = AckermannDriveStamped()
         drive_msg.drive.speed = velocity
@@ -401,6 +508,8 @@ class StanleyAvoidance(Node):
         angle = np.clip(angle, -self.steering_limit, self.steering_limit)
 
         velocity = self.target_velocity * self.velocity_percentage
+        if self.paused or self.lap_done:
+            velocity = 0.0
 
         self.get_logger().info(
             f"cte={y_lateral:+.2f}m off={self.avoidance_offset:+.2f}m "

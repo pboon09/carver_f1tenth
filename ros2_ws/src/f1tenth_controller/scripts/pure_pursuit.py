@@ -9,9 +9,11 @@ from scipy.spatial.transform import Rotation as R
 
 import rclpy
 from rclpy.node import Node
-from rclpy.qos import qos_profile_sensor_data
+from rclpy.qos import (qos_profile_sensor_data, QoSProfile,
+                       DurabilityPolicy, ReliabilityPolicy)
 from nav_msgs.msg import Odometry
 from sensor_msgs.msg import LaserScan
+from std_msgs.msg import Bool
 from geometry_msgs.msg import PoseWithCovarianceStamped
 from visualization_msgs.msg import Marker
 from ackermann_msgs.msg import AckermannDriveStamped
@@ -41,10 +43,9 @@ class PurePursuit(Node):
         # Speed
         self.declare_parameter("velocity", 0.5)
         # Safety clamp on the commanded speed (applied after the path-yaml
-        # speed profile is sampled). Defaults to a slow crawl while tuning;
-        # raise max_speed once the path tracks cleanly.
+        # speed profile is sampled). 0.5 m/s matches raceline_generator --vmax.
         self.declare_parameter("min_speed", 0.0)
-        self.declare_parameter("max_speed", 0.3)
+        self.declare_parameter("max_speed", 0.5)
 
         # Lookahead — scales linearly with speed between min and max.
         # min_lookahead=0.6 m gives the controller ~2 waypoints of warning
@@ -96,6 +97,11 @@ class PurePursuit(Node):
         self.declare_parameter("lap_topic",            "/initialpose")
         self.declare_parameter("lap_far_threshold",    2.0)   # m
         self.declare_parameter("lap_close_threshold",  0.6)   # m
+        # Grace period AFTER the car first re-enters the close zone before
+        # the stop fires. Lets the car cross past the start point cleanly
+        # (at 0.5 m/s × 3 s ≈ 1.5 m overshoot) instead of slamming brakes
+        # the instant it touches the close radius.
+        self.declare_parameter("lap_dwell_seconds",    3.0)
 
         # Read parameters
         self.odom_topic  = str(self.get_parameter("odom_topic").value)
@@ -128,9 +134,19 @@ class PurePursuit(Node):
         self.lap_topic             = str(self.get_parameter("lap_topic").value)
         self.lap_far_threshold     = float(self.get_parameter("lap_far_threshold").value)
         self.lap_close_threshold   = float(self.get_parameter("lap_close_threshold").value)
+        self.lap_dwell_seconds     = float(self.get_parameter("lap_dwell_seconds").value)
         self.lap_start             = None    # np.ndarray when set
         self.lap_far               = False
         self.lap_done              = False
+        # ROS clock time when the car first re-entered the close zone after
+        # passing the far threshold. lap_done triggers lap_dwell_seconds
+        # later — gives the car a small overshoot past the start point.
+        self.lap_complete_at       = None
+
+        # External pause flag (set by /controller_pause topic, published by
+        # the launcher's pause/resume button). Path markers keep publishing
+        # while paused; only the commanded drive speed is forced to 0.
+        self.paused                = False
 
         # Load waypoints (also sets self.waypoint_velocities)
         self.waypoint_velocities = None
@@ -161,7 +177,7 @@ class PurePursuit(Node):
             )
         self.drive_pub = self.create_publisher(AckermannDriveStamped, self.drive_topic, 10)
         self.target_pub = self.create_publisher(Marker, "/pure_pursuit/target", 10)
-        self.path_pub   = self.create_publisher(Marker, "/pure_pursuit/path", 10)
+        self.path_pub   = self.create_publisher(Marker, "/viz/path", 10)
 
         if self.safety_stop_distance > 0.0:
             self.scan_sub = self.create_subscription(
@@ -183,6 +199,18 @@ class PurePursuit(Node):
                 f"{self.lap_topic} (need to travel >{self.lap_far_threshold:.1f} m "
                 f"away, return within {self.lap_close_threshold:.1f} m)"
             )
+
+        # External pause: launcher publishes Bool on /controller_pause with
+        # TRANSIENT_LOCAL durability so late-joining subscribers (us, just
+        # launched) immediately get the latest pause state.
+        pause_qos = QoSProfile(
+            depth=1,
+            durability=DurabilityPolicy.TRANSIENT_LOCAL,
+            reliability=ReliabilityPolicy.RELIABLE,
+        )
+        self.pause_sub = self.create_subscription(
+            Bool, "/controller_pause", self._pause_callback, pause_qos
+        )
 
         # Publish path immediately and then twice a second so RViz picks
         # it up within the first frame after the controller starts, and
@@ -218,6 +246,14 @@ class PurePursuit(Node):
     # Main callback
     # ------------------------------------------------------------------
 
+    def _pause_callback(self, msg: Bool):
+        # Toggle external pause. While paused, the drive callback forces
+        # commanded speed to 0 but path/target markers keep publishing so
+        # RViz still shows the planned line.
+        if self.paused != msg.data:
+            self.get_logger().info(f"pause = {msg.data}")
+        self.paused = bool(msg.data)
+
     def _twist_callback(self, msg: Odometry):
         # Separate twist source — used when odom_topic carries pose but no
         # twist (e.g. /dedicate_odom in map frame).
@@ -231,10 +267,12 @@ class PurePursuit(Node):
         self.lap_start = np.array([p.x, p.y])
         self.lap_far = False
         self.lap_done = False
+        self.lap_complete_at = None
         self.get_logger().info(
             f"lap start ← ({p.x:+.2f}, {p.y:+.2f})  "
             f"(need: travel >{self.lap_far_threshold:.1f} m away, "
-            f"return within {self.lap_close_threshold:.1f} m → STOP)"
+            f"return within {self.lap_close_threshold:.1f} m, "
+            f"then {self.lap_dwell_seconds:.1f} s grace → STOP)"
         )
 
     def _scan_callback(self, msg: LaserScan):
@@ -344,8 +382,20 @@ class PurePursuit(Node):
             target_speed = self.velocity
         target_speed = float(np.clip(target_speed, self.min_speed, self.max_speed))
 
+        # Auto-record lap start on first odom message so the detector works
+        # even if the user doesn't manually click '2D Pose Estimate' first.
+        # /initialpose still overrides this (resets lap_start, lap_far, lap_done).
+        if self.lap_start is None and self.lap_far_threshold > 0.0:
+            self.lap_start = curr_pos.copy()
+            self.get_logger().info(
+                f"lap start (auto) ← ({curr_pos[0]:+.2f}, {curr_pos[1]:+.2f})  "
+                f"— set 2D Pose Estimate in RViz to override"
+            )
+
         # Lap-complete detector — needs both a "far away" excursion and a
         # "back near start" return so the car can't trigger before moving.
+        # After re-entering the close zone, an additional lap_dwell_seconds
+        # grace period runs so the car overshoots the start point cleanly.
         if self.lap_start is not None and not self.lap_done:
             d = float(np.linalg.norm(curr_pos - self.lap_start))
             if not self.lap_far and d > self.lap_far_threshold:
@@ -353,15 +403,27 @@ class PurePursuit(Node):
                 self.get_logger().info(
                     f"lap: passed far threshold (d={d:.2f} m), watching for return"
                 )
-            elif self.lap_far and d < self.lap_close_threshold:
-                self.lap_done = True
-                self.get_logger().warn(
-                    f"LAP COMPLETE — stopping (d={d:.2f} m from start)"
+            elif self.lap_far and self.lap_complete_at is None \
+                    and d < self.lap_close_threshold:
+                self.lap_complete_at = self.get_clock().now()
+                self.get_logger().info(
+                    f"lap: returned within {d:.2f} m of start — "
+                    f"stopping in {self.lap_dwell_seconds:.1f} s"
                 )
+            elif self.lap_complete_at is not None:
+                elapsed = (self.get_clock().now()
+                           - self.lap_complete_at).nanoseconds / 1e9
+                if elapsed >= self.lap_dwell_seconds:
+                    self.lap_done = True
+                    self.get_logger().warn(
+                        f"LAP COMPLETE — stopping "
+                        f"(grace {elapsed:.1f} s after close detect)"
+                    )
 
-        # Emergency stop overrides commanded speed but keeps current steering
-        # so the car holds its line while braking.
-        if self.emergency_stop or self.lap_done:
+        # Emergency stop, lap complete, or external pause overrides the
+        # commanded speed but keeps current steering so the car holds its
+        # line while braking.
+        if self.emergency_stop or self.lap_done or self.paused:
             target_speed = 0.0
 
         drive_msg = AckermannDriveStamped()

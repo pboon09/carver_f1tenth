@@ -42,7 +42,7 @@ class VescVelocity(Node):
         super().__init__("vesc_velocity")
 
         self.declare_parameter("wheel_radius", 0.0594)
-        self.declare_parameter("gear_ratio", 4.0)
+        self.declare_parameter("gear_ratio", 29.5)
         self.declare_parameter("wheelbase", 0.30)   # URDF: 0.192757 - (-0.10719)
         self.declare_parameter("publish_rate", 100.0)
         self.declare_parameter("base_frame", "basefootprint")

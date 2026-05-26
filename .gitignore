@@ -4,6 +4,7 @@
 /ros2_ws/log
 /.vscode
 *.pyc
+*.mcap
 /sensor_ws/build
 /sensor_ws/install
 /sensor_ws/log

@@ -29,8 +29,10 @@ from ament_index_python.packages import get_package_share_directory
 from geometry_msgs.msg import PoseWithCovarianceStamped
 from nav_msgs.msg import Odometry
 from rclpy.node import Node
-from rclpy.qos import qos_profile_sensor_data
+from rclpy.qos import (qos_profile_sensor_data, QoSProfile,
+                       DurabilityPolicy, ReliabilityPolicy)
 from sensor_msgs.msg import LaserScan
+from std_msgs.msg import Bool
 from visualization_msgs.msg import Marker, MarkerArray
 
 
@@ -58,36 +60,39 @@ class LatticePlanner(Node):
         self.declare_parameter("odom_topic",   "/dedicate_odom")
         self.declare_parameter("twist_topic",  "/odometry/filtered")
         # Safety clamp on commanded speed (applied after the path + obstacle
-        # taper). max_speed=0.3 is a slow-and-safe crawl while tuning; raise
-        # once obstacle avoidance behaves on real-world scans.
+        # taper). 0.5 m/s matches the raceline_generator --vmax setting.
         self.declare_parameter("min_speed",    0.0)
-        self.declare_parameter("max_speed",    0.3)
-        # Max lateral shift from raceline for candidate paths. Geometric
-        # ceiling = corridor half-width − car half-width − safety_buffer.
-        # Beam: 0.50 − 0.165 − 0.05 ≈ 0.28 m. Use 0.27 m to leave 1 cm of
-        # geometric margin; candidates touching walls get rejected by the
-        # wall_clr penalty anyway. On wider tracks (Spielberg, ~3 m) raise
-        # to ~1.0.
-        self.declare_parameter("max_offset",            0.27)
+        self.declare_parameter("max_speed",    0.5)
+        # Max lateral shift from raceline for candidate paths. Set to the
+        # WIDE-section ceiling (not the min), and let the per-candidate
+        # wall_clr penalty reject the wide-swing options on tight sections.
+        # Beam: right-wall ray-cast hits 0.75 m, so 0.40 m gives the planner
+        # real room to choose on the wide curves while staying safe at the
+        # 0.38 m narrows (those candidates get rejected for low clearance).
+        self.declare_parameter("max_offset",            0.45)
         # Extra clearance beyond the car's physical edge. The effective
         # safety_radius used by collision checks is car_width/2 + safety_buffer.
         # 0.34 m worked on wide sim tracks but is impossible inside a 0.5 m
         # half-corridor — set it to a small physical margin (5 cm) here.
-        self.declare_parameter("safety_buffer",         0.05)
+        self.declare_parameter("safety_buffer",         0.045)
         # Lidar returns within this distance of the raceline are classified
         # as on-track OBSTACLES; further returns are walls. Must be SMALLER
         # than the corridor half-width or every wall return becomes an
-        # obstacle and the planner brakes constantly. Beam corridor
-        # half-width ≈ 0.5 m → 0.25 leaves ~0.25 m gap to wall classification.
-        self.declare_parameter("track_half_width",      0.25)
+        # obstacle and the planner brakes constantly. But too small misses
+        # obstacles that sit just off the line, classifying them as walls
+        # (much weaker score penalty) so the planner picks the centerline
+        # path right next to the obstacle. 0.40 m works for Nine_clean
+        # (corridor half-width ≈ 0.6 m). Drop to 0.25 m on the tighter beam
+        # corridor (half-width ≈ 0.5 m) via `ros2 param set` if needed.
+        self.declare_parameter("track_half_width",      0.40)
         # Planning
-        self.declare_parameter("plan_horizon",          2.5)   # m ahead
-        self.declare_parameter("num_offsets",           11)    # ~5 cm resolution over ±0.27 m
+        self.declare_parameter("plan_horizon",          1.5)   # m ahead
+        self.declare_parameter("num_offsets",           9)     # 10 cm spacing across ±0.40 m
         # Scoring (deviation & continuity are the useful knobs; smooth/clearance hardcoded)
         self.declare_parameter("w_deviation",           1.0)   # prefer staying near raceline
         self.declare_parameter("w_continuity",          1.5)   # penalise offset changes
         # Pure pursuit
-        self.declare_parameter("min_lookahead",         0.6)
+        self.declare_parameter("min_lookahead",         0.8)
         self.declare_parameter("max_lookahead",         1.5)
         self.declare_parameter("speed_gain",            0.35)
         # Bicycle-model responsiveness multiplier — see _pure_pursuit() below.
@@ -122,6 +127,9 @@ class LatticePlanner(Node):
         self.declare_parameter("lap_topic",             "/initialpose")
         self.declare_parameter("lap_far_threshold",     2.0)
         self.declare_parameter("lap_close_threshold",   0.6)
+        # Grace period after first re-entering close zone before lap_done
+        # fires — gives the car a clean overshoot past the start point.
+        self.declare_parameter("lap_dwell_seconds",     3.0)
 
         p = lambda name: self.get_parameter(name).value
         self.car_width           = float(p("car_width"))
@@ -155,11 +163,18 @@ class LatticePlanner(Node):
         self.lap_topic           = str(p("lap_topic"))
         self.lap_far_threshold   = float(p("lap_far_threshold"))
         self.lap_close_threshold = float(p("lap_close_threshold"))
+        self.lap_dwell_seconds   = float(p("lap_dwell_seconds"))
         # Lap-stop and direction-detect state (matches pure_pursuit).
         self.lap_start: object   = None    # np.ndarray when set
         self.lap_far             = False
         self.lap_done            = False
+        # ROS clock time when the car first re-entered the close zone after
+        # passing the far threshold. lap_done fires lap_dwell_seconds later.
+        self.lap_complete_at     = None
         self._direction_checked  = False
+        # External pause: set by the launcher via /controller_pause topic.
+        # Path/markers keep publishing; only the commanded speed is forced 0.
+        self.paused              = False
 
         # Derived constants (not exposed — change safety_radius/imminent_dist instead)
         # Trigger/check bands sit slightly outside the required clearance so
@@ -219,7 +234,73 @@ class LatticePlanner(Node):
                 f"away, return within {self.lap_close_threshold:.1f} m)"
             )
 
+        # External pause from the launcher button (TRANSIENT_LOCAL so we
+        # immediately get the latest state on subscribe — even if the
+        # launcher published it before we started).
+        pause_qos = QoSProfile(
+            depth=1,
+            durability=DurabilityPolicy.TRANSIENT_LOCAL,
+            reliability=ReliabilityPolicy.RELIABLE,
+        )
+        self.pause_sub = self.create_subscription(
+            Bool, "/controller_pause", self._pause_cb, pause_qos
+        )
+
+        # Register live-tunable params (safety margins, candidate fan, etc.).
+        # Changing these via `ros2 param set` triggers _on_param_change which
+        # re-derives safety_radius and the offset array immediately.
+        self.add_on_set_parameters_callback(self._on_param_change)
+
         self.get_logger().info("Lattice planner ready.")
+
+    def _on_param_change(self, params):
+        """Recompute derived safety values when car_width or safety_buffer
+        are set live via `ros2 param set`. Without this, the cached
+        self.safety_radius is frozen at __init__ time so live tweaks of
+        wall-collision margin don't take effect."""
+        from rcl_interfaces.msg import SetParametersResult
+        changed = False
+        for p in params:
+            if p.name == "car_width":
+                self.car_width = float(p.value)
+                changed = True
+            elif p.name == "safety_buffer":
+                self.safety_buffer = float(p.value)
+                changed = True
+            elif p.name == "track_half_width":
+                self.track_half_width = float(p.value)
+            elif p.name == "imminent_dist":
+                self.imminent_dist = float(p.value)
+                self._obs_approach_start = 4.0 * self.imminent_dist
+            elif p.name == "imminent_cone_rad":
+                self.imminent_cone_rad = float(p.value)
+            elif p.name == "max_offset":
+                self.max_offset = float(p.value)
+                self.offsets = np.linspace(-self.max_offset,
+                                            self.max_offset, self.num_offsets)
+            elif p.name == "num_offsets":
+                self.num_offsets = int(p.value)
+                self.offsets = np.linspace(-self.max_offset,
+                                            self.max_offset, self.num_offsets)
+        if changed:
+            self.safety_radius = self.car_width / 2.0 + self.safety_buffer
+            trigger_margin = max(self.safety_buffer, 0.05)
+            self._required_clearance = self.safety_radius
+            self._trigger_clearance = self.safety_radius + trigger_margin
+            self._lateral_check_band = self.safety_radius + trigger_margin
+            self.get_logger().info(
+                f"safety_radius recomputed: {self.safety_radius:.3f} m "
+                f"(car_width/2={self.car_width/2:.3f} + buffer={self.safety_buffer:.3f})"
+            )
+        return SetParametersResult(successful=True)
+
+    def _pause_cb(self, msg: Bool):
+        # Toggle external pause. While paused, the drive callback forces
+        # commanded speed to 0 but path/marker publishers keep running so
+        # the GUI/RViz still shows the planned trajectory.
+        if self.paused != msg.data:
+            self.get_logger().info(f"pause = {msg.data}")
+        self.paused = bool(msg.data)
 
     def _lap_cb(self, msg: PoseWithCovarianceStamped):
         # Each /initialpose message defines a NEW lap-start point and resets
@@ -228,10 +309,12 @@ class LatticePlanner(Node):
         self.lap_start = np.array([p.x, p.y])
         self.lap_far = False
         self.lap_done = False
+        self.lap_complete_at = None
         self.get_logger().info(
             f"lap start ← ({p.x:+.2f}, {p.y:+.2f})  "
             f"(need: travel >{self.lap_far_threshold:.1f} m away, "
-            f"return within {self.lap_close_threshold:.1f} m → STOP)"
+            f"return within {self.lap_close_threshold:.1f} m, "
+            f"then {self.lap_dwell_seconds:.1f} s grace → STOP)"
         )
 
     # ── Waypoint loading ─────────────────────────────────────────────────────
@@ -286,7 +369,12 @@ class LatticePlanner(Node):
         if len(pts_car) == 0:
             return np.zeros((0, 2)), np.zeros((0, 2))
         pts_map = (R @ pts_car.T).T + curr_pos
-        diff    = pts_map[:, np.newaxis, :] - global_window[np.newaxis, :, :]
+        # Use a densified centerline so the obs/wall split doesn't change
+        # discontinuously at waypoint boundaries (a point right between two
+        # raw waypoints can otherwise be measured 0.15 m farther than it
+        # actually is from the path line).
+        dense_window = self._densify_path(global_window)
+        diff    = pts_map[:, np.newaxis, :] - dense_window[np.newaxis, :, :]
         dist    = np.linalg.norm(diff, axis=2).min(axis=1)
         obs     = pts_map[dist <= self.track_half_width]
         walls   = pts_map[(dist > self.track_half_width) &
@@ -294,10 +382,16 @@ class LatticePlanner(Node):
         return obs, walls
 
     def _candidate_obstacles(self, candidate, obs_map):
-        """Keep obs_map points within lateral_check_band of a candidate path."""
+        """Keep obs_map points within lateral_check_band of a candidate path.
+        Densifies the candidate before measuring — at the raw 0.3 m waypoint
+        spacing an obstacle sitting between two waypoints could land outside
+        the band on the min-to-waypoint check while the actual path-line
+        passes right through it. The downstream clearance check uses the
+        densified path too, so this keeps the two consistent."""
         if len(obs_map) == 0:
             return obs_map
-        diff   = obs_map[:, np.newaxis, :] - candidate[np.newaxis, :, :]
+        dense  = self._densify_path(candidate)
+        diff   = obs_map[:, np.newaxis, :] - dense[np.newaxis, :, :]
         d_cand = np.linalg.norm(diff, axis=2).min(axis=1)
         return obs_map[d_cand <= self._lateral_check_band]
 
@@ -345,7 +439,17 @@ class LatticePlanner(Node):
                 )
             self._direction_checked = True
 
-        # Lap-complete detector.
+        # Auto-record lap start on first odom message so the detector works
+        # even if the user doesn't manually click '2D Pose Estimate' first.
+        # /initialpose still overrides this (resets lap_start, lap_far, lap_done).
+        if self.lap_start is None and self.lap_far_threshold > 0.0:
+            self.lap_start = curr_pos.copy()
+            self.get_logger().info(
+                f"lap start (auto) ← ({curr_pos[0]:+.2f}, {curr_pos[1]:+.2f})  "
+                f"— set 2D Pose Estimate in RViz to override"
+            )
+
+        # Lap-complete detector with overshoot grace period.
         if self.lap_start is not None and not self.lap_done:
             d = float(np.linalg.norm(curr_pos - self.lap_start))
             if not self.lap_far and d > self.lap_far_threshold:
@@ -353,11 +457,22 @@ class LatticePlanner(Node):
                 self.get_logger().info(
                     f"lap: passed far threshold (d={d:.2f} m), watching for return"
                 )
-            elif self.lap_far and d < self.lap_close_threshold:
-                self.lap_done = True
-                self.get_logger().warn(
-                    f"LAP COMPLETE — stopping (d={d:.2f} m from start)"
+            elif self.lap_far and self.lap_complete_at is None \
+                    and d < self.lap_close_threshold:
+                self.lap_complete_at = self.get_clock().now()
+                self.get_logger().info(
+                    f"lap: returned within {d:.2f} m of start — "
+                    f"stopping in {self.lap_dwell_seconds:.1f} s"
                 )
+            elif self.lap_complete_at is not None:
+                elapsed = (self.get_clock().now()
+                           - self.lap_complete_at).nanoseconds / 1e9
+                if elapsed >= self.lap_dwell_seconds:
+                    self.lap_done = True
+                    self.get_logger().warn(
+                        f"LAP COMPLETE — stopping "
+                        f"(grace {elapsed:.1f} s after close detect)"
+                    )
 
         nearest       = self._find_nearest(curr_pos)
         self.prev_nearest = nearest
@@ -492,9 +607,10 @@ class LatticePlanner(Node):
                 frac  = self._obs_approach_min_frac + (1.0 - self._obs_approach_min_frac) * t
                 speed *= frac
 
-        # Lap-complete override: hold the wheel steady at current steering
-        # but command zero speed until /initialpose is republished.
-        if self.lap_done:
+        # Lap-complete / external-pause override: hold the wheel steady at
+        # current steering but command zero speed. Lap-done clears only on
+        # next /initialpose; pause clears when launcher publishes False.
+        if self.lap_done or self.paused:
             speed = 0.0
 
         drive = AckermannDriveStamped()
@@ -551,6 +667,8 @@ class LatticePlanner(Node):
             clearance = min(obs_clr, wall_clr)
 
             # Hard reject: candidate too close to either an obstacle or a wall.
+            # Use the same threshold for both — on a narrow corridor, a stricter
+            # obstacle requirement causes every candidate to be rejected.
             if clearance < self._required_clearance:
                 if clearance > fallback_clr:
                     fallback_clr, fallback_path, fallback_offset = clearance, anchored, offset
@@ -560,10 +678,18 @@ class LatticePlanner(Node):
             surplus = obs_clr - self._required_clearance
             # Soft wall penalty: scales with how short of safety_radius the
             # actual lidar-detected wall is. wall_clr=safety_radius → 0 penalty.
-            wall_short = max(0.0, self.safety_radius + 0.10 - wall_clr)
+            # Penalty kicks in when wall_clr drops within safety_radius + 0.20
+            # (was +0.10) — gives the planner more headroom to react to
+            # close walls / mis-classified obstacles before they're imminent.
+            wall_short = max(0.0, self.safety_radius + 0.20 - wall_clr)
+            # Strong obstacle-clearance penalty — pushes the planner to pick a
+            # candidate that gives the obstacle a wide berth from the FIRST
+            # decision instead of picking marginal clearance and re-correcting.
+            # 25 × (0.8 − surplus)² grows fast: surplus=0.3 → penalty=6.25,
+            # surplus=0.6 → penalty=1.0, surplus≥0.8 → penalty=0.
             score = (self.w_deviation  * abs(offset)
                    + 0.3               * self._curvature_cost(candidate)
-                   + 4.0               * max(0.0, 0.6 - surplus) ** 2
+                   + 25.0              * max(0.0, 0.8 - surplus) ** 2
                    + 15.0              * wall_short ** 2
                    + self.w_continuity * abs(offset - self.committed_offset))
             if score < best_score:

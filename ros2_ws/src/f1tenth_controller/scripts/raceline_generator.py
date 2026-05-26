@@ -659,11 +659,13 @@ def _limit_curvature(xy: np.ndarray, kappa_max: float,
 
 
 def calc_speed_profile(xy: np.ndarray, v_max: float,
-                        a_lat: float, a_lon: float = 2.0) -> np.ndarray:
+                        a_lat: float, a_lon: float = 2.0,
+                        v_min: float = 0.0) -> np.ndarray:
     """
     Step A – lateral limit:   v_lat[i] = sqrt(a_lat / max(κ_i, ε))
     Step B – forward pass:    v[i] ≤ sqrt(v[i-1]² + 2*a_lon*ds)  (acceleration)
     Step C – backward pass:   v[i] ≤ sqrt(v[i+1]² + 2*a_lon*ds)  (braking)
+    Step D – floor at v_min   (so even hairpins don't drop below crawl speed).
     """
     kappa = calc_curvature(xy)
     kappa = gaussian_filter1d(kappa, sigma=3, mode="wrap")
@@ -679,6 +681,9 @@ def calc_speed_profile(xy: np.ndarray, v_max: float,
         v[i] = min(v[i], math.sqrt(v[i - 1] ** 2 + 2.0 * a_lon * ds[i - 1]))
     for i in range(n - 2, -1, -1):
         v[i] = min(v[i], math.sqrt(v[i + 1] ** 2 + 2.0 * a_lon * ds[i]))
+
+    if v_min > 0.0:
+        v = np.maximum(v, v_min)
 
     return v
 
@@ -897,6 +902,11 @@ def main():
     parser.add_argument("--lane",    default="mincurv",
                         choices=["centerline", "mincurv", "inner", "outer"],
                         help="Lane / raceline type (default: mincurv)")
+    parser.add_argument("--vmin",    type=float, default=0.0,
+                        help="Minimum speed floor m/s (default: 0 = disabled). "
+                             "Speeds below this are clamped up — useful when "
+                             "tight corners would otherwise produce sub-crawl "
+                             "values the VESC can't hold.")
     parser.add_argument("--vmax",    type=float, default=4.0,
                         help="Maximum speed m/s (default: 4.0)")
     parser.add_argument("--alat",    type=float, default=4.0,
@@ -1014,7 +1024,8 @@ def main():
     # ── Step 3: Speed profile ─────────────────────────────────────────────────
     print("\n── Step 3: Speed profile (curvature-based) ──")
     v = calc_speed_profile(xy_race, v_max=args.vmax,
-                            a_lat=args.alat, a_lon=args.alon)
+                            a_lat=args.alat, a_lon=args.alon,
+                            v_min=args.vmin)
     print(f"  v: min={v.min():.2f}  mean={v.mean():.2f}  max={v.max():.2f} m/s")
 
     # ── Corner report: curvature + actual wall clearance ─────────────────────
