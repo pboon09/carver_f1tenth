@@ -30,12 +30,12 @@ class StanleyAvoidance(Node):
         self.declare_parameter("odom_topic", "dedicate_odom")
         self.declare_parameter("drive_topic", "/drive")
         self.declare_parameter("velocity", 0.5)
-        self.declare_parameter("K_E", 0.7)
-        self.declare_parameter("K_H", 0.5)
+        self.declare_parameter("K_E", 0.5)
+        self.declare_parameter("K_H", 0.4)
         self.declare_parameter("K_p", 0.5)
         self.declare_parameter("K_p_obstacle", 0.8)
-        self.declare_parameter("min_lookahead", 0.6)
-        self.declare_parameter("max_lookahead", 1.5)
+        self.declare_parameter("min_lookahead", 0.3)
+        self.declare_parameter("max_lookahead", 0.8)
         self.declare_parameter("min_lookahead_speed", 0.5)
         self.declare_parameter("max_lookahead_speed", 0.7)
         self.declare_parameter("velocity_percentage", 1.0)
@@ -43,10 +43,20 @@ class StanleyAvoidance(Node):
         self.declare_parameter("velocity_max", 0.7)
         self.declare_parameter("steering_limit", 0.4189)
         self.declare_parameter("grid_width_meters", 6.0)
-        self.declare_parameter("cells_per_meter", 10)
+        self.declare_parameter("cells_per_meter", 20)
         self.declare_parameter("wheelbase", 0.33)
-        self.declare_parameter("estop_dist", 0.30)
+        # E-stop distance from the FRONT BUMPER (not from the lidar).
+        # The lidar is mounted behind the bumper; we add lidar_to_nose
+        # below so the comparison happens in nose-relative meters.
+        self.declare_parameter("estop_dist", 0.10)
         self.declare_parameter("estop_half_arc_deg", 15.0)
+        # Forward distance from the lidar to the front bumper (positive
+        # means lidar is BEHIND the nose, which is typical for F1TENTH).
+        # Measure with a tape: lidar mount centre → car nose, along +x.
+        self.declare_parameter("lidar_to_nose", 0.20)
+        self.declare_parameter("car_half_width", 0.16)
+        self.declare_parameter("safety_buffer", 0.0)
+        self.declare_parameter("obstacle_detect_lookahead", 1.5)
 
         self.scan_topic = str(self.get_parameter("scan_topic").value)
         self.odom_topic = str(self.get_parameter("odom_topic").value)
@@ -65,6 +75,12 @@ class StanleyAvoidance(Node):
         self.base_velocity = float(self.get_parameter("velocity").value)
         self.estop_dist = float(self.get_parameter("estop_dist").value)
         self.estop_half_arc = math.radians(float(self.get_parameter("estop_half_arc_deg").value))
+        self.lidar_to_nose = float(self.get_parameter("lidar_to_nose").value)
+        self.car_half_width = float(self.get_parameter("car_half_width").value)
+        self.safety_buffer = float(self.get_parameter("safety_buffer").value)
+        self.obstacle_detect_lookahead = float(self.get_parameter("obstacle_detect_lookahead").value)
+        # Inflation used by the avoidance grid collision check.
+        self.inflate_radius = self.car_half_width + self.safety_buffer
 
         self.min_lookahead = float(self.get_parameter("min_lookahead").value)
         self.max_lookahead = float(self.get_parameter("max_lookahead").value)
@@ -83,7 +99,7 @@ class StanleyAvoidance(Node):
         self.target_pub = self.create_publisher(Marker, "/viz/drive_target", 10)
         self.grid_pub = self.create_publisher(OccupancyGrid, "/occupancy_grid", 10)
 
-        self.grid_height = int(self.L * self.CELLS_PER_METER)
+        self.grid_height = int(self.obstacle_detect_lookahead * self.CELLS_PER_METER)
         self.grid_width = int(self.grid_width_meters * self.CELLS_PER_METER)
         self.CELL_Y_OFFSET = (self.grid_width // 2) - 1
         self.occupancy_grid = np.full((self.grid_height, self.grid_width), 0, dtype=int)
@@ -141,7 +157,10 @@ class StanleyAvoidance(Node):
         waypoints_car = self._transform_waypoints(self.waypoints_world, position, pose)
         distances = np.linalg.norm(waypoints_car, axis=1)
 
-        self.L = min(
+        # Dynamic lookahead used ONLY to pick the goal waypoint here.
+        # self.L stays pinned at max_lookahead so the grid extent and the
+        # lidar populate range are stable (matches upstream's design).
+        dynamic_L = min(
             max(
                 self.min_lookahead,
                 self.min_lookahead
@@ -152,13 +171,43 @@ class StanleyAvoidance(Node):
             self.max_lookahead,
         )
 
-        indices_L = np.argsort(np.where(distances < self.L, distances, -1))[::-1]
+        indices_L = np.argsort(np.where(distances < dynamic_L, distances, -1))[::-1]
 
         for i in indices_L:
             if waypoints_car[i][0] > 0:
                 self.index = i
                 return waypoints_car[self.index], self.waypoints_world[self.index]
         return None, None
+
+    def _path_blocked(self, max_distance, margin):
+        """Walk along path waypoints from car position up to max_distance
+        forward (along the path), checking each short segment for collision.
+
+        Unlike a single car→goal chord (which cuts inside corners and
+        false-positives on walls), this follows the actual curved path,
+        so each 0.3m segment has only ~1cm chord deviation and walls
+        stay outside the margin.
+
+        Returns (blocked, first_blocking_cell_or_None).
+        """
+        position = (self.current_pose.position.x, self.current_pose.position.y, 0)
+        waypoints_car = self._transform_waypoints(self.waypoints_world, position, self.current_pose)
+        distances = np.linalg.norm(waypoints_car, axis=1)
+
+        forward = (waypoints_car[:, 0] > 0.05) & (distances < max_distance)
+        idx = np.where(forward)[0]
+        if idx.size == 0:
+            return False, None
+        idx = idx[np.argsort(distances[idx])]
+
+        prev_cell = self._to_grid(0.0, 0.0)
+        for i in idx:
+            wp = waypoints_car[i]
+            cell = self._to_grid(float(wp[0]), float(wp[1]))
+            if self._check_collision(prev_cell, cell, margin=margin):
+                return True, cell
+            prev_cell = cell
+        return False, None
 
     def _get_waypoint_stanley(self, pose):
         position = (pose.position.x, pose.position.y, 0)
@@ -289,22 +338,27 @@ class StanleyAvoidance(Node):
         if self.current_pose is None or self.goal_pos is None:
             return
 
-        # ── E-STOP: hard cutoff if anything is too close directly in front ──
+        # ── E-STOP: hard cutoff if anything is too close to the front bumper ──
+        # Ranges are from the lidar; nose is `lidar_to_nose` meters ahead of it.
+        # So obstacle distance from nose = lidar_range - lidar_to_nose.
         ranges = np.asarray(msg.ranges, dtype=float)
         angles = msg.angle_min + np.arange(len(ranges)) * msg.angle_increment
         forward = np.abs(np.arctan2(np.sin(angles), np.cos(angles))) < self.estop_half_arc
         rng = ranges[forward]
         rng = rng[np.isfinite(rng) & (rng > 0.05)]
-        if rng.size > 0 and rng.min() < self.estop_dist:
-            stop = AckermannDriveStamped()
-            stop.drive.speed = 0.0
-            stop.drive.steering_angle = 0.0
-            self.drive_pub.publish(stop)
-            self.get_logger().warn(
-                f"E-STOP: obstacle at {rng.min():.2f}m within ±{math.degrees(self.estop_half_arc):.0f}° forward",
-                throttle_duration_sec=1.0,
-            )
-            return
+        if rng.size > 0:
+            nose_dist = rng.min() - self.lidar_to_nose
+            if nose_dist < self.estop_dist:
+                stop = AckermannDriveStamped()
+                stop.drive.speed = 0.0
+                stop.drive.steering_angle = 0.0
+                self.drive_pub.publish(stop)
+                self.get_logger().warn(
+                    f"E-STOP: obstacle {nose_dist:.2f}m from nose "
+                    f"(lidar range {rng.min():.2f}m, lidar_to_nose {self.lidar_to_nose:.2f}m)",
+                    throttle_duration_sec=1.0,
+                )
+                return
 
         self._populate_grid(msg.ranges, msg.angle_increment, msg.angle_min)
         self._convolve_grid()
@@ -313,9 +367,22 @@ class StanleyAvoidance(Node):
         current_pos = np.array(self._to_grid(0, 0))
         goal_pos = np.array(self._to_grid(self.goal_pos[0], self.goal_pos[1]))
         target = None
-        MARGIN = int(self.CELLS_PER_METER * 0.15)
+        MARGIN = int(self.CELLS_PER_METER * self.inflate_radius)
 
-        if self._check_collision(current_pos, goal_pos, margin=MARGIN):
+        # Detect blockage by walking along the curved path (no chord-cutting
+        # at corners). If anything blocks the path up to obstacle_detect_lookahead
+        # meters ahead, fall back to the sideways-shift avoidance logic.
+        blocked, blocked_cell = self._path_blocked(
+            max_distance=self.obstacle_detect_lookahead, margin=MARGIN
+        )
+        self.get_logger().info(
+            f"path_blocked={blocked} car_grid=({current_pos[0]},{current_pos[1]}) "
+            f"goal_grid=({goal_pos[0]},{goal_pos[1]}) "
+            f"H/W={self.grid_height}x{self.grid_width} MARGIN={MARGIN}",
+            throttle_duration_sec=0.5,
+        )
+
+        if blocked:
             self.obstacle_detected = True
             shifts = [i * (-1 if i % 2 else 1) for i in range(1, 21)]
 
@@ -377,7 +444,7 @@ class StanleyAvoidance(Node):
         thetas = angle_min + indices * angle_increment
         xs = ranges * np.cos(thetas)
         ys = ranges * np.sin(thetas)
-        forward = (xs > 0.2) & (xs < self.L)
+        forward = (xs > 0.2) & (xs < self.obstacle_detect_lookahead)
         half_w = self.grid_width_meters / 2
         lateral = (ys > -half_w) & (ys < half_w)
         in_range = forward & lateral
