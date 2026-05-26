@@ -1,95 +1,4 @@
 #!/usr/bin/python3
-"""
-Stanley + reactive obstacle avoidance.
-
-Based on the upstream package `f1tenth_ws/src/stanley_avoidance`
-(see UPSTREAM_NOTES.md in this directory for the failure analysis).
-
-This is an adapted port for a sub-scale track (~1/3 the linear scale of
-an official F1TENTH competition track) running at low cruise speed
-(~0.5 m/s vs upstream's 3–6 m/s). Each modification from upstream is
-marked inline with `[ADAPT-N]` and listed below:
-
-  [ADAPT-1]  wheelbase 0.33 → 0.30 m
-             Reason: URDF wheel-joint origins give a 0.300 m wheelbase
-             on this car (see f1tenth_description/urdf/f1tenth_urdf.urdf).
-             Upstream's 0.33 default was wrong for our chassis.
-
-  [ADAPT-2]  steering_limit in radians (0.4189) instead of degrees (25).
-             Reason: matches the f1tenth_mixer's `max_steering_angle`
-             parameter so the controller's clip and the mixer's clip
-             agree.
-
-  [ADAPT-3]  One-shot path-direction auto-flip at startup.
-             Ported from upstream pure_pursuit.py. Detects if the car
-             is facing opposite the loop direction at start and reverses
-             the waypoint order (and adds pi to each theta) so stanley's
-             heading-error term has the correct sign.
-
-  [ADAPT-4]  Stanley path_heading taken directly from yaml `theta`.
-             Reason: upstream derives path_heading from atan2(front_wp -
-             rear_wp). Our waypoint spacing (0.30 m) is ~equal to the
-             wheelbase (0.30 m), so front and rear axles often snap to
-             the SAME waypoint → atan2(0,0) garbage. Using stored theta
-             from raceline_generator avoids this.
-
-  [ADAPT-5]  Path-walking obstacle detection (replaces single chord).
-             Reason: upstream's single car→goal chord cuts inside corners
-             at R=0.81 m by ~30 cm. With path-to-wall clearance of only
-             0.20 m on tight corners, false positives every corner.
-             Walking each 0.30 m waypoint segment has ~1 cm chord
-             deviation — no false positives.
-
-  [ADAPT-6]  Side detection from actual obstacle cell relative to path.
-             Reason: a centroid of occupied grid cells gets polluted by
-             walls. Using the cell that triggered `_path_blocked` and
-             projecting it onto the perpendicular of the blocked segment
-             gives a wall-agnostic measurement.
-
-  [ADAPT-7]  Velocity during avoidance capped to cruise.
-             Reason: upstream's `velocity_max` is intended to be LESS
-             than cruise (3-6 m/s race). Our cruise is 0.5 m/s and the
-             defaults inverted this — the car was accelerating into
-             obstacles. Now clamped to min(table, cruise).
-
-  [ADAPT-8]  Hard `avoidance_steer_limit` separate from `steering_limit`.
-             Reason: upstream's K_p_obstacle*2y/L² gives ~4° at their
-             L=2.5 m, but ~50° at our L=0.5 m → saturates at the global
-             steering_limit. A separate, tighter cap during avoidance
-             prevents the pure-pursuit from crashing into walls.
-
-  [ADAPT-9]  E-stop with `lidar_to_nose` offset.
-             Reason: lidar reports range from its own frame; need to
-             subtract the lidar-to-bumper offset (~0.28 m on our car)
-             to get nose-relative distance before comparing to threshold.
-
- [ADAPT-10]  Safe (0, 0) drive command on SIGINT/SIGTERM/SIGTSTP.
-             Operational safety. Prevents the VESC from holding its
-             last commanded speed when the controller exits.
-
- [ADAPT-11]  Adaptive shift_base near the obstacle.
-             Reason: upstream uses self.goal_pos (dynamic_L ~0.5 m
-             forward) as shift base; at our scale this gives pure-
-             pursuit angles too small to translate the car in time.
-             Placing shift_base 5 cells past the obstacle keeps the
-             pure-pursuit L small enough to produce meaningful angles.
-
- [ADAPT-12]  Diagnostic logging of cte, head_err, path_blocked, AVOID
-             targets, and obstacle distance, all throttled.
-
- [ADAPT-14]  Shift is applied PERPENDICULAR to path direction (not
-             perpendicular to car heading). Upstream shifts the goal in
-             car-frame lateral, which produces the wrong direction when
-             the path curves. Using the blocked segment's tangent gives
-             a shifted target on a path parallel to the original raceline.
-
-Note: an earlier prototype replaced upstream's chord-shift avoidance
-with Follow-the-Gap. It was rejected because the resulting algorithm
-loses path-bias — it picks the largest gap regardless of where the
-raceline goes, behaviorally equivalent to gap_follow.py. The current
-file restores chord-shift as the avoidance mechanism since that is
-upstream stanley_avoidance's distinguishing feature.
-"""
 
 import math
 import os
@@ -125,15 +34,8 @@ class StanleyAvoidance(Node):
         self.declare_parameter("K_H", 0.4)
         self.declare_parameter("K_p", 0.5)
         self.declare_parameter("K_p_obstacle", 0.3)
-        # How far sideways the avoidance fallback is allowed to shift the
-        # goal (in grid cells). On a narrow corridor, large shifts make
-        # pure-pursuit drive an arc that hits the wall — keep this small.
         self.declare_parameter("max_shift_cells", 6)
-        # Hard steering cap while the avoidance branch is driving. Lower
-        # than steering_limit to keep pure-pursuit gentle even when the
-        # geometry would otherwise demand a saturated turn.
-        # [ADAPT-8] separate steering cap during avoidance branch
-        self.declare_parameter("avoidance_steer_limit", 0.524)  # 30°
+        self.declare_parameter("avoidance_steer_limit", 0.524)  # [ADAPT-8] 30°
         self.declare_parameter("min_lookahead", 0.3)
         self.declare_parameter("max_lookahead", 0.8)
         self.declare_parameter("min_lookahead_speed", 0.5)
@@ -141,18 +43,17 @@ class StanleyAvoidance(Node):
         self.declare_parameter("velocity_percentage", 1.0)
         self.declare_parameter("velocity_min", 0.5)
         self.declare_parameter("velocity_max", 0.7)
-        self.declare_parameter("steering_limit", 0.4189)  # [ADAPT-2] radians, not degrees
+        self.declare_parameter("steering_limit", 0.4189)  # [ADAPT-2] radians
         self.declare_parameter("grid_width_meters", 6.0)
         self.declare_parameter("cells_per_meter", 20)
-        self.declare_parameter("wheelbase", 0.30)  # [ADAPT-1] URDF says 0.30, not 0.33
-        # [ADAPT-9] E-stop measures nose-relative distance, not raw lidar range.
+        self.declare_parameter("wheelbase", 0.30)  # [ADAPT-1] from URDF
+        # [ADAPT-9] E-stop
         self.declare_parameter("estop_dist", 0.10)
         self.declare_parameter("estop_half_arc_deg", 15.0)
-        self.declare_parameter("lidar_to_nose", 0.20)
+        self.declare_parameter("lidar_to_nose", 0.28)
         self.declare_parameter("car_half_width", 0.16)
         self.declare_parameter("safety_buffer", 0.0)
-        # [ADAPT-5] grid extent + path-walking detection range
-        self.declare_parameter("obstacle_detect_lookahead", 2.5)
+        self.declare_parameter("obstacle_detect_lookahead", 2.5)  # [ADAPT-5]
 
         self.scan_topic = str(self.get_parameter("scan_topic").value)
         self.odom_topic = str(self.get_parameter("odom_topic").value)
@@ -177,7 +78,6 @@ class StanleyAvoidance(Node):
         self.car_half_width = float(self.get_parameter("car_half_width").value)
         self.safety_buffer = float(self.get_parameter("safety_buffer").value)
         self.obstacle_detect_lookahead = float(self.get_parameter("obstacle_detect_lookahead").value)
-        # Inflation used by the avoidance grid collision check.
         self.inflate_radius = self.car_half_width + self.safety_buffer
 
         self.min_lookahead = float(self.get_parameter("min_lookahead").value)
@@ -190,8 +90,7 @@ class StanleyAvoidance(Node):
         self.get_logger().info(f"Loaded {len(self.waypoints_world)} waypoints")
 
         self.odom_sub = self.create_subscription(Odometry, self.odom_topic, self.odom_callback, 1)
-        # /scan from RPLidar driver is BEST_EFFORT — must match here or
-        # this subscription receives zero messages.
+        # /scan is BEST_EFFORT — QoS must match or subscription drops everything.
         self.scan_sub = self.create_subscription(LaserScan, self.scan_topic, self.scan_callback, qos_profile_sensor_data)
         self.drive_pub = self.create_publisher(AckermannDriveStamped, self.drive_topic, 10)
         self.target_pub = self.create_publisher(Marker, "/viz/drive_target", 10)
@@ -211,46 +110,35 @@ class StanleyAvoidance(Node):
         self.goal_pos = None
         self.target_velocity = 0.0
         self.obstacle_detected = False
-        self.obstacle_distance = 999.0  # forward distance to obstacle in meters; large = no obstacle
+        self.obstacle_distance = 999.0
         self.velocity_index = 0
         self.index = 0
         self.odom_frame = "map"
         self._direction_checked = False
 
-        # Obstacle-side lock: once we commit to a swerve direction, hold it
-        # until the path is clear for several ticks. Prevents flipping
-        # direction mid-maneuver when the obstacle moves out of the
-        # centroid search strip in car frame.
-        self.obstacle_side_lock = None        # None, True (right), or False (left)
-        self.obstacle_block_counter = 0       # consecutive blocked ticks (before lock)
-        self.obstacle_block_threshold = 3     # require N blocked ticks to commit to avoidance
+        # Detection lock + confirm/clear counters
+        self.obstacle_side_lock = None
+        self.obstacle_block_counter = 0
+        self.obstacle_block_threshold = 3
         self.obstacle_clear_counter = 0
-        self.obstacle_clear_threshold = 10    # ticks of "clear" before lock releases
-        # Last avoidance target — reused during held-but-not-currently-blocked
-        # ticks to prevent oscillation when path_blocked flickers
+        self.obstacle_clear_threshold = 10
         self.last_avoid_target = None
 
-        # [ADAPT-15] Local-window nearest-waypoint anchor.
+        # [ADAPT-15] local-window waypoint search
         self._wp_idx = None
         self.waypoint_window = 12
 
-        # [ADAPT-16] Lateral offset on stanley's cte. During avoidance we
-        # add a signed offset to the cross-track measurement so stanley
-        # tracks a path PARALLEL to the original raceline, offset by
-        # avoidance_offset_m. The heading term keeps the car aligned with
-        # the original path direction — heading stays parallel, NOT
-        # pointed at a swerve target.
+        # [ADAPT-16] lateral offset on stanley's cte
         self.declare_parameter("avoidance_offset_m", 0.30)
-        self.declare_parameter("offset_ramp_per_tick", 0.02)  # slow ramp (1.5s to full offset)
+        self.declare_parameter("max_avoidance_offset_m", 0.60)  # cap so we don't drive into walls
+        self.declare_parameter("offset_ramp_per_tick", 0.04)
         self.avoidance_offset_m = float(self.get_parameter("avoidance_offset_m").value)
+        self.max_avoidance_offset_m = float(self.get_parameter("max_avoidance_offset_m").value)
         self.offset_ramp_per_tick = float(self.get_parameter("offset_ramp_per_tick").value)
         self.target_offset = 0.0
         self.avoidance_offset = 0.0
-        # Obstacle's world position, set at first confirmed detection.
-        # Used to detect when the car has driven PAST the obstacle (in
-        # world frame, so the test is robust to car rotation).
-        self.obstacle_world_xy = None  # (x, y) or None
-        self.declare_parameter("obstacle_passed_thresh", -0.10)  # car_frame x: <this = passed
+        self.obstacle_world_xy = None
+        self.declare_parameter("obstacle_passed_thresh", -0.10)
         self.obstacle_passed_thresh = float(self.get_parameter("obstacle_passed_thresh").value)
 
     def _load_waypoints(self):
@@ -305,9 +193,7 @@ class StanleyAvoidance(Node):
         waypoints_car = self._transform_waypoints(self.waypoints_world, position, pose)
         distances = np.linalg.norm(waypoints_car, axis=1)
 
-        # Dynamic lookahead used ONLY to pick the goal waypoint here.
-        # self.L stays pinned at max_lookahead so the grid extent and the
-        # lidar populate range are stable (matches upstream's design).
+        # self.L stays pinned at max_lookahead; dynamic_L only picks the goal
         dynamic_L = min(
             max(
                 self.min_lookahead,
@@ -319,27 +205,33 @@ class StanleyAvoidance(Node):
             self.max_lookahead,
         )
 
-        # [ADAPT-15] Restrict candidates to a local window around the
-        # last known wp_idx so this can't jump to the opposite side of
-        # the loop after the car drifts.
+        # [ADAPT-15] local window
+        n = len(self.waypoints_world)
+        w = self.waypoint_window
         if self._wp_idx is not None:
-            n = len(self.waypoints_world)
-            w = self.waypoint_window
             window_idx = np.array([(self._wp_idx + di) % n
                                    for di in range(-w, w + 1)])
-            local_d = distances[window_idx]
-            order = np.argsort(np.where(local_d < dynamic_L, local_d, -1))[::-1]
-            for o in order:
-                i = window_idx[o]
-                if waypoints_car[i][0] > 0:
-                    self.index = int(i)
-                    return waypoints_car[self.index], self.waypoints_world[self.index]
         else:
-            indices_L = np.argsort(np.where(distances < dynamic_L, distances, -1))[::-1]
-            for i in indices_L:
-                if waypoints_car[i][0] > 0:
-                    self.index = int(i)
-                    return waypoints_car[self.index], self.waypoints_world[self.index]
+            window_idx = np.arange(n)
+
+        forward_mask = waypoints_car[window_idx][:, 0] > 0
+        in_range_mask = distances[window_idx] < dynamic_L
+        valid_mask = in_range_mask & forward_mask
+
+        if valid_mask.any():
+            # farthest in-range, forward
+            cands = window_idx[valid_mask]
+            idx = int(cands[int(np.argmax(distances[cands]))])
+            self.index = idx
+            return waypoints_car[idx], self.waypoints_world[idx]
+
+        if forward_mask.any():
+            # no in-range forward → pick closest forward in window
+            cands = window_idx[forward_mask]
+            idx = int(cands[int(np.argmin(distances[cands]))])
+            self.index = idx
+            return waypoints_car[idx], self.waypoints_world[idx]
+
         return None, None
 
     def _path_blocked(self, max_distance, margin):
@@ -392,10 +284,7 @@ class StanleyAvoidance(Node):
             self.current_pose.orientation.w,
         ])
 
-        # [ADAPT-3] One-shot direction check (ported from upstream pure_pursuit).
-        # If the car is facing opposite the path loop direction at startup,
-        # flip the waypoint order so theta and the closest-waypoint
-        # progression align with travel direction.
+        # [ADAPT-3] one-shot startup direction check
         if not self._direction_checked:
             curr_yaw = R.from_quat(current_pose_quaternion).as_euler("xyz")[2]
             curr_pos = np.array([self.current_pose.position.x,
@@ -449,14 +338,9 @@ class StanleyAvoidance(Node):
         L = np.linalg.norm(point)
         y = point[1]
         angle = K_p * (2 * y) / (L ** 2)
-        # [ADAPT-8] use the tighter avoidance steering cap, not the global
-        # steering_limit. At our short L, pure-pursuit easily demands
-        # saturating angles that would slam into walls.
+        # [ADAPT-8] tighter cap during avoidance
         angle = np.clip(angle, -self.avoidance_steer_limit, self.avoidance_steer_limit)
-
-        # [ADAPT-7] Velocity during avoidance = cruise (no slowdown).
-        # Rationale: react fast, no proximity-based deceleration. E-stop
-        # is the floor for collision safety.
+        # [ADAPT-7] velocity = cruise during avoidance (e-stop is the safety floor)
         velocity = self.target_velocity * self.velocity_percentage
 
         drive_msg = AckermannDriveStamped()
@@ -473,8 +357,7 @@ class StanleyAvoidance(Node):
         return angle, velocity
 
     def drive_to_target_stanley(self):
-        # [ADAPT-4] path_heading from yaml's stored theta (third return),
-        # not derived from front/rear waypoint atan2 like upstream.
+        # [ADAPT-4] path_heading from yaml theta (4th return is wp index)
         closest_wheelbase_front_point_car, _, path_heading, stanley_wp = self._get_waypoint_stanley(
             self.current_pose_wheelbase_front
         )
@@ -484,15 +367,11 @@ class StanleyAvoidance(Node):
             self.current_pose_wheelbase_front.position.x - self.current_pose.position.x,
         )
 
-        # [ADAPT-16] Add avoidance lateral offset to cte. Stanley follows
-        # a path PARALLEL to the original raceline, offset by `avoidance_offset`.
-        # The heading_error term below uses original path_heading, so the
-        # car's heading stays aligned with the original path direction.
+        # [ADAPT-16] cte gets the lateral offset; heading stays parallel to path
         y_lateral = closest_wheelbase_front_point_car[1]
         y_effective = y_lateral + self.avoidance_offset
         crosstrack_error = math.atan2(self.K_E * y_effective, self.target_velocity)
         heading_error = path_heading - current_heading
-        # Wrap to [-pi, pi]
         heading_error = math.atan2(math.sin(heading_error), math.cos(heading_error))
         heading_error *= self.K_H
 
@@ -519,9 +398,7 @@ class StanleyAvoidance(Node):
         if self.current_pose is None or self.goal_pos is None:
             return
 
-        # ── [ADAPT-9] E-STOP: nose-relative cutoff ──
-        # Lidar reports range from its own frame; nose is `lidar_to_nose`
-        # meters ahead of the lidar. obstacle_nose_dist = lidar_range - lidar_to_nose.
+        # [ADAPT-9] E-stop in nose-relative meters (lidar_range − lidar_to_nose)
         ranges = np.asarray(msg.ranges, dtype=float)
         angles = msg.angle_min + np.arange(len(ranges)) * msg.angle_increment
         forward = np.abs(np.arctan2(np.sin(angles), np.cos(angles))) < self.estop_half_arc
@@ -550,9 +427,7 @@ class StanleyAvoidance(Node):
         target = None
         MARGIN = int(self.CELLS_PER_METER * self.inflate_radius)
 
-        # Detect blockage by walking along the curved path (no chord-cutting
-        # at corners). If anything blocks the path up to obstacle_detect_lookahead
-        # meters ahead, fall back to the sideways-shift avoidance logic.
+        # [ADAPT-5] path-walking detection
         blocked, block_info = self._path_blocked(
             max_distance=self.obstacle_detect_lookahead, margin=MARGIN
         )
@@ -563,13 +438,8 @@ class StanleyAvoidance(Node):
             throttle_duration_sec=0.5,
         )
 
-        # ── [ADAPT-16] World-frame obstacle tracking + lateral offset ──
-        # If we've passed the obstacle in WORLD frame, target_offset → 0.
-        # If we have a confirmed detection, target_offset = ±avoidance_offset_m.
-        # Else target_offset stays at its current value (could be 0 or ramping).
-
+        # [ADAPT-16] check if we've passed the locked obstacle in WORLD frame
         if self.obstacle_world_xy is not None:
-            # Have a previously locked obstacle. Check if we've passed it.
             wx, wy = self.obstacle_world_xy
             quat = np.array([self.current_pose.orientation.x, self.current_pose.orientation.y,
                              self.current_pose.orientation.z, self.current_pose.orientation.w])
@@ -577,6 +447,13 @@ class StanleyAvoidance(Node):
             rel = inv.apply([wx - self.current_pose.position.x,
                              wy - self.current_pose.position.y, 0.0])
             obs_x_car = float(rel[0])
+            obs_y_car = float(rel[1])
+            self.get_logger().info(
+                f"  locked obs world=({wx:+.2f},{wy:+.2f}) "
+                f"car_pose=({self.current_pose.position.x:+.2f},{self.current_pose.position.y:+.2f}) "
+                f"obs_in_car=({obs_x_car:+.2f},{obs_y_car:+.2f})",
+                throttle_duration_sec=0.3,
+            )
             if obs_x_car < self.obstacle_passed_thresh:
                 self.get_logger().info(
                     f"  PASSED obstacle (obs_x_car={obs_x_car:+.2f}m) — ramping offset back"
@@ -595,18 +472,32 @@ class StanleyAvoidance(Node):
                 pass  # not yet confirmed
             else:
                 self.obstacle_detected = True
-
-                # [ADAPT-6] Side detection from actual obstacle cell.
+                # [ADAPT-6] side relative to path tangent
                 measured_on_right = self._obstacle_on_right_of_path(
                     block_info['prev_cell'],
                     block_info['next_cell'],
                     block_info['obstacle_cell'],
                 )
 
-                # Lock side and STORE obstacle's WORLD position on first confirmed detection
+                # obstacle's perpendicular distance from blocked segment
+                p = block_info['prev_cell']
+                q = block_info['next_cell']
+                o = block_info['obstacle_cell']
+                di = float(q[0] - p[0])
+                dj = float(q[1] - p[1])
+                pmag = math.sqrt(di * di + dj * dj)
+                if pmag > 0.01:
+                    pi = -dj / pmag
+                    pj = -di / pmag
+                    mi = (p[0] + q[0]) / 2.0
+                    mj = (p[1] + q[1]) / 2.0
+                    perp_cells = abs((o[0] - mi) * pi + (o[1] - mj) * pj)
+                    perp_m = perp_cells / self.CELLS_PER_METER
+                else:
+                    perp_m = 0.0
+
                 if self.obstacle_side_lock is None:
                     self.obstacle_side_lock = measured_on_right
-                    # Transform obstacle_cell → car frame → world frame
                     obs_car_xy = self._from_grid(block_info['obstacle_cell'])
                     quat = np.array([self.current_pose.orientation.x, self.current_pose.orientation.y,
                                      self.current_pose.orientation.z, self.current_pose.orientation.w])
@@ -620,27 +511,30 @@ class StanleyAvoidance(Node):
                         f"  LOCKED obstacle_side={'RIGHT' if measured_on_right else 'LEFT'} "
                         f"obstacle_cell={block_info['obstacle_cell']} "
                         f"obstacle_world=({self.obstacle_world_xy[0]:+.2f},{self.obstacle_world_xy[1]:+.2f}) "
+                        f"perp_from_path={perp_m:.2f}m "
                         f"(after {self.obstacle_block_counter} confirmed ticks)"
                     )
 
-                # Set target_offset (signed). Obstacle on RIGHT → shift LEFT → +offset.
-                self.target_offset = (+self.avoidance_offset_m
-                                      if self.obstacle_side_lock
-                                      else -self.avoidance_offset_m)
+                # size offset to actually clear the obstacle, capped at max
+                required_m = perp_m + self.car_half_width + 0.05
+                mag = max(self.avoidance_offset_m, required_m)
+                mag = min(mag, self.max_avoidance_offset_m)
+                # obstacle RIGHT → +offset (shift LEFT); LEFT → -offset
+                self.target_offset = +mag if self.obstacle_side_lock else -mag
         else:
             self.obstacle_detected = False
             self.obstacle_distance = 999.0
             self.obstacle_block_counter = 0
             self.obstacle_clear_counter += 1
 
-        # [ADAPT-16] Ramp current offset toward target_offset (smooth transition)
+        # ramp offset toward target_offset (smooth)
         delta = self.target_offset - self.avoidance_offset
         if abs(delta) <= self.offset_ramp_per_tick:
             self.avoidance_offset = self.target_offset
         else:
             self.avoidance_offset += math.copysign(self.offset_ramp_per_tick, delta)
 
-        # ALWAYS run stanley — the avoidance is just an offset on cte.
+        # always stanley — avoidance is just the offset on cte
         self._publish_target(msg.header.frame_id, msg.header.stamp,
                              self.goal_pos, avoiding=(abs(self.avoidance_offset) > 0.01))
         self.drive_to_target_stanley()
