@@ -1,0 +1,10 @@
+controller,scenario,lap_time_s,cte_rms_m,min_clearance_m,detour_length_m,recovery_dist_m
+fgm,obstacle1,25.5772,0.1193,0.2625,14.6665,1.0245
+fgm,obstacle2,25.3367,0.1214,0.2805,14.5610,0.4960
+fgm,obstacle3,25.5163,0.1096,0.2385,14.5375,0.6940
+stanley,obstacle1,31.6078,0.1859,0.2625,13.5826,1.0946
+stanley,obstacle2,32.4065,0.1714,0.2105,13.1287,1.4504
+stanley,obstacle3,31.4952,0.1546,0.1980,12.3939,1.5100
+lattice,obstacle1,31.6356,0.1643,0.2780,14.5371,1.6533
+lattice,obstacle2,32.9972,0.1812,0.2455,15.0759,1.7252
+lattice,obstacle3,30.6783,0.1288,0.3065,14.0591,0.9430

@@ -1,0 +1,4 @@
+controller,scenario,cte_mean_m,cte_max_m,heading_err_rms_deg,lap_time_s,completion_pct
+fgm,noobs,0.0875,0.2008,7.9938,24.9755,100.0000
+stanley,noobs,0.0701,0.1496,3.6240,30.9242,100.0000
+lattice,noobs,0.0877,0.1673,3.6175,30.3781,100.0000
