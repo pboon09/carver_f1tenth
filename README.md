@@ -10,11 +10,11 @@ This repository contains the full software stack for a comparative study of obst
 
 ### Team Members
 
-- นางสาว ดิษย์ธร สุทธาเวศ (66340500019)
-- นางสาว บุณยาพร ปรีชาศุทธิ์ (66340500031)
-- นาย ภคิน บุญชนะชัย (66340500037)
-- นาย ภูริวัฒ เกษมสุขไพศาล (66340500044)
-- นาย ณัฏฐ์พัชร์ ลาภสิทธิวงศ์ (66340500077)
+- Disthorn Suttawet (66340500019)
+- Boonyaporn Preechasuth (66340500031)
+- Phakin Boonchanachai (66340500037)
+- Phuriwat Kasamesookphaisal (66340500044)
+- Natthapatch Lapsittiwong (66340500077)
 
 The team belongs to the Institute of Field Robotics (FIBO) at King Mongkut's University of Technology Thonburi (KMUTT).
 
@@ -38,6 +38,10 @@ The team belongs to the Institute of Field Robotics (FIBO) at King Mongkut's Uni
 - The tests run in a controlled track environment with random obstacles.
 - The system visualizes and analyzes data in real-time through RViz2.
 - The work does not cover GPS-based navigation or visual SLAM.
+
+### 1.3 References
+
+The complete presentation that underpins this README is available in two forms. The local PDF copy sits at [`slide.pdf`](slide.pdf) in the repository root. A web hosted version of the same deck lives on Canva at [https://canva.link/7leqwalwav72o28](https://canva.link/7leqwalwav72o28). Readers who want the full visual context, additional figures, or the live demo videos should refer to either of those sources.
 
 ---
 
@@ -68,7 +72,7 @@ The drivetrain uses a brushless DC motor controlled over the UART protocol throu
 | 2 | RPLIDAR C1 | <img src="figure/rplidar.webp" width="120"/> | The sensor is a 2D 360 degree LiDAR scanner. Range reaches up to 12 meters. Scan frequency falls between 5 and 10 hertz. Angular resolution is roughly 0.9 degrees. |
 | 3 | BNO055 USB Stick | <img src="figure/BNO055-USB-STICK.webp" width="120"/> | The sensor type is a 9 degree of freedom absolute orientation IMU. The output contains Euler angles, quaternion, and linear acceleration. |
 
-The car dimensions and mechanical limits appear in the figure below. The gear ratio is 29.5 to 1, and the maximum steering angle satisfies $\delta_{\max} = \pm 24^{\circ}$.
+The car dimensions and mechanical limits appear in the figure below. The gear ratio is 29.5 to 1, and the maximum steering angle satisfies $`\delta_{\max} = \pm 24^{\circ}`$.
 
 <img src="figure/car_dimension.png" width="500" alt="F1tenth car dimensions"/>
 
@@ -99,7 +103,7 @@ The main topics are listed below.
 
 The F1tenth car is approximated by a bicycle model where the two front wheels collapse into one steerable wheel and the two rear wheels collapse into one driven wheel. Together with the no-slip assumption and the Instantaneous Center of Rotation construction, this approximation yields the classical kinematic equations shown below.
 
-<img src="figure/BicycleModel_x_y_theta.svg" width="500" alt="Bicycle kinematic model"/>
+<img src="figure/BicycleModel_x_y_theta.png" width="500" alt="Bicycle kinematic model"/>
 
 $$
 \dot{x} = v\cos(\theta), \qquad
@@ -107,13 +111,13 @@ $$
 \dot{\theta} = \frac{v\tan(\delta)}{L}
 $$
 
-The inverse relation gives the steering angle in terms of the measured yaw rate $\Omega_z$.
+The inverse relation gives the steering angle in terms of the measured yaw rate $`\Omega_z`$.
 
 $$
 \delta = \arctan\!\left(\frac{L\,\Omega_z}{v}\right)
 $$
 
-Here $L$ denotes the wheel base and $\delta$ denotes the front wheel steering angle.
+Here $`L`$ denotes the wheel base and $`\delta`$ denotes the front wheel steering angle.
 
 ---
 
@@ -140,7 +144,7 @@ The raceline is computed offline from the saved map by `f1tenth_controller/scrip
 | 5. Pruned Skeleton | The generator iteratively removes skeleton pixels that have only one neighbor. |
 | 6. Directed Main Loop | The generator builds a graph where skeleton pixels are nodes and adjacency forms edges. It then calls `networkx.cycle_basis` and picks the longest cycle, which becomes the closed track loop with traversal direction preserved. |
 | 7. Resampled Centerline | The generator parameterizes the pixel loop by arc length, then it re-interpolates at uniform spacing. |
-| 8. Balanced and Smoothed | The generator ray casts perpendicular left and right from each waypoint, then it nudges the waypoint toward the midpoint until $\mathrm{gap}_L \approx \mathrm{gap}_R$. |
+| 8. Balanced and Smoothed | The generator ray casts perpendicular left and right from each waypoint, then it nudges the waypoint toward the midpoint until $`\mathrm{gap}_L \approx \mathrm{gap}_R`$. |
 
 ### 6.2 Speed Profile
 
@@ -162,7 +166,7 @@ $$
 v[i] \;\le\; \sqrt{v[i+1]^2 + 2\,a_{\text{lon}}\,ds}
 $$
 
-The final value is then clamped to the interval $[v_{\min}, v_{\max}]$.
+The final value is then clamped to the interval $`[v_{\min}, v_{\max}]`$.
 
 ---
 
@@ -188,7 +192,7 @@ $$
 k = \frac{1}{R} = \frac{2\sin(\alpha)}{LD}
 $$
 
-The kinematic bicycle steering command then becomes the expression below, where the dynamic look ahead distance grows with the forward velocity $V_f$.
+The kinematic bicycle steering command then becomes the expression below, where the dynamic look ahead distance grows with the forward velocity $`V_f`$.
 
 $$
 \delta = \arctan\!\left(\frac{2\sin(\alpha)}{LD}\right)
@@ -199,7 +203,7 @@ A small look ahead distance produces aggressive tracking that tends to oscillate
 
 ### 7.3 Stanley
 
-Stanley uses the front axle as the reference point. It combines the heading error $\psi$ with the cross-track error $e$, where the cross-track error is the distance from the front axle to the closest point on the path. The steering command appears below.
+Stanley uses the front axle as the reference point. It combines the heading error $`\psi`$ with the cross-track error $`e`$, where the cross-track error is the distance from the front axle to the closest point on the path. The steering command appears below.
 
 $$
 \delta(t) = k_{\text{heading}}\,\psi(t)
@@ -213,14 +217,14 @@ The arctangent term naturally softens the cross-track correction at high forward
 
 The LiDAR preprocessing runs at 10 hertz. Any point closer than 2.5 meters becomes an obstacle, while invalid LiDAR readings are treated as far free space. The planner only uses the front window of plus or minus 120 degrees.
 
-The controller then creates an adaptive safety bubble where closer obstacles produce a larger bubble and farther obstacles produce a smaller one. The physical bubble size converts into a LiDAR index width $B_i$, and the inflated range $p_j$ becomes zero inside the bubble.
+The controller then creates an adaptive safety bubble where closer obstacles produce a larger bubble and farther obstacles produce a smaller one. The physical bubble size converts into a LiDAR index width $`B_i`$, and the inflated range $`p_j`$ becomes zero inside the bubble.
 
 $$
 B_i = \frac{b(\tilde{r}_i)}{\tilde{r}_i \, \Delta\theta}, \qquad
 p_j = \begin{cases} 0, & j \in [i-B_i,\;i+B_i] \\ r_j, & \text{otherwise} \end{cases}
 $$
 
-A gap is a continuous sequence of non-zero LiDAR ranges. A value of $p_j = 0$ marks an unsafe direction, and a value of $p_j > 0$ marks a candidate free direction. For each candidate gap $k$ the controller measures the gap width, the gap distance statistics, and the gap center.
+A gap is a continuous sequence of non-zero LiDAR ranges. A value of $`p_j = 0`$ marks an unsafe direction, and a value of $`p_j > 0`$ marks a candidate free direction. For each candidate gap $`k`$ the controller measures the gap width, the gap distance statistics, and the gap center.
 
 $$
 W_k = e_k - s_k + 1, \qquad c_k = \frac{s_k + e_k}{2}, \qquad c_0 = \frac{N}{2}
@@ -247,7 +251,7 @@ $$
 c^{*} = \frac{s^{*} + e^{*}}{2}, \qquad \theta^{*} = \theta_{\min} + c^{*}\Delta\theta
 $$
 
-The clearance is the minimum free distance around the chosen heading, where the inspection window $\mathcal{W}(\theta^{*})$ depends on the turning direction. The window spans $[\theta^{*}, \theta^{*}+45^{\circ}]$ when the robot turns right, $[\theta^{*}-45^{\circ}, \theta^{*}]$ when it turns left, and $[\theta^{*}-30^{\circ}, \theta^{*}+30^{\circ}]$ when it goes mostly straight.
+The clearance is the minimum free distance around the chosen heading, where the inspection window $`\mathcal{W}(\theta^{*})`$ depends on the turning direction. The window spans $`[\theta^{*}, \theta^{*}+45^{\circ}]`$ when the robot turns right, $`[\theta^{*}-45^{\circ}, \theta^{*}]`$ when it turns left, and $`[\theta^{*}-30^{\circ}, \theta^{*}+30^{\circ}]`$ when it goes mostly straight.
 
 $$
 D_{\text{clear}} = \min_{i \in \mathcal{W}(\theta^{*})} p_i
@@ -267,7 +271,7 @@ $$
 
 A large clearance with a small steering angle produces higher speed. A small clearance with a sharp turn produces slower speed.
 
-The steering command is smoothed to avoid sudden jumps, and a speed dependent gain $f_v$ reduces the steering authority when the car is fast.
+The steering command is smoothed to avoid sudden jumps, and a speed dependent gain $`f_v`$ reduces the steering authority when the car is fast.
 
 $$
 \alpha_{\text{des}} = \mathrm{clip}(\theta^{*}, -\alpha_{\max}, \alpha_{\max}), \qquad
@@ -296,7 +300,7 @@ r_{\text{inflate}} = r_{\text{vehicle}} + r_{\text{safety}}, \qquad
 \text{Collision} = \exists\, c \in (\text{PathSegment} \oplus r_{\text{inflate}}) : \text{Occ}(c) = 1
 $$
 
-In Step 3 the controller determines the side of the path on which the obstacle lies, and then it computes the target offset magnitude from the perpendicular distance $d_\perp$.
+In Step 3 the controller determines the side of the path on which the obstacle lies, and then it computes the target offset magnitude from the perpendicular distance $`d_\perp`$.
 
 $$
 s = \mathrm{sign}\!\left((\mathbf{p}_{\text{next}} - \mathbf{p}_{\text{prev}}) \times (\mathbf{p}_{\text{obs}} - \mathbf{p}_{\text{prev}})\right)
@@ -306,7 +310,7 @@ $$
 e_{\text{target}} = -s \cdot \mathrm{clip}\!\left(d_\perp + r_{\text{vehicle}} + r_{\text{safety}},\; e_{\min},\, e_{\max}\right)
 $$
 
-In Step 4 the controller ramps the applied offset $e_{\text{offset}}$ toward the target with a maximum step $r$, and it resets the target to zero once the obstacle passes behind the car.
+In Step 4 the controller ramps the applied offset $`e_{\text{offset}}`$ toward the target with a maximum step $`r`$, and it resets the target to zero once the obstacle passes behind the car.
 
 $$
 \Delta e = e_{\text{target}} - e_{\text{offset}}(k), \qquad
@@ -345,7 +349,7 @@ Any candidate that falls within `safety_radius` of an obstacle or wall is hard r
 
 A small state machine controls when to avoid. In the FOLLOWING state the planner checks whether the centerline itself is blocked, and if so it evaluates all candidates and locks onto the best offset. In the AVOIDING state the planner keeps the committed path, and it re-plans only after `replan_hold_ticks` to prevent oscillation. The planner returns to the centerline only when both the committed path and the centerline stay clear for `clear_hold_ticks` consecutive ticks.
 
-The control stage applies Pure Pursuit on the selected path. The adaptive look ahead equals the product of speed and gain, and it is clamped to the interval from 0.8 to 1.5 meters. The planner finds the target point and computes the steering command through the bicycle model expression $\delta = \arctan(L \cdot 2y / L_d^{2})$.
+The control stage applies Pure Pursuit on the selected path. The adaptive look ahead equals the product of speed and gain, and it is clamped to the interval from 0.8 to 1.5 meters. The planner finds the target point and computes the steering command through the bicycle model expression $`\delta = \arctan(L \cdot 2y / L_d^{2})`$.
 
 ---
 
