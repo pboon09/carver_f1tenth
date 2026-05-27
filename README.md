@@ -242,19 +242,19 @@ S_k = 0.4\,d_{\max,k} + 0.6\,d_{\text{avg},k} \times S_{\text{center},k}
 $$
 
 $$
-k^{*} = \arg\max_{k} S_k
+k^{\ast} = \arg\max_{k} S_k
 $$
 
 The robot drives toward the center of the best gap according to the heading selection below.
 
 $$
-c^{*} = \frac{s^{*} + e^{*}}{2}, \qquad \theta^{*} = \theta_{\min} + c^{*}\Delta\theta
+c^{\ast} = \frac{s^{\ast} + e^{\ast}}{2}, \qquad \theta^{\ast} = \theta_{\min} + c^{\ast}\Delta\theta
 $$
 
-The clearance is the minimum free distance around the chosen heading, where the inspection window $`\mathcal{W}(\theta^{*})`$ depends on the turning direction. The window spans $`[\theta^{*}, \theta^{*}+45^{\circ}]`$ when the robot turns right, $`[\theta^{*}-45^{\circ}, \theta^{*}]`$ when it turns left, and $`[\theta^{*}-30^{\circ}, \theta^{*}+30^{\circ}]`$ when it goes mostly straight.
+The clearance is the minimum free distance around the chosen heading, where the inspection window $`\mathcal{W}(\theta^{\ast})`$ depends on the turning direction. The window spans $`[\theta^{\ast}, \theta^{\ast}+45^{\circ}]`$ when the robot turns right, $`[\theta^{\ast}-45^{\circ}, \theta^{\ast}]`$ when it turns left, and $`[\theta^{\ast}-30^{\circ}, \theta^{\ast}+30^{\circ}]`$ when it goes mostly straight.
 
 $$
-D_{\text{clear}} = \min_{i \in \mathcal{W}(\theta^{*})} p_i
+D_{\text{clear}} = \min_{i \in \mathcal{W}(\theta^{\ast})} p_i
 $$
 
 The raw speed depends on the clearance, and the controller then applies a sharp turn penalty to slow the car when the steering angle grows.
@@ -266,7 +266,7 @@ v_{\max}, & D_{\text{clear}} > 4.0 \\
 K_p\,D_{\text{clear}}, & \text{otherwise}
 \end{cases}
 \qquad
-v = \mathrm{clip}\!\left(v_{\text{raw}}\,(0.4 + 0.6\cos|\theta^{*}|),\; v_{\min},\, v_{\max}\right)
+v = \mathrm{clip}\!\left(v_{\text{raw}}\,(0.4 + 0.6\cos|\theta^{\ast}|),\; v_{\min},\, v_{\max}\right)
 $$
 
 A large clearance with a small steering angle produces higher speed. A small clearance with a sharp turn produces slower speed.
@@ -274,7 +274,7 @@ A large clearance with a small steering angle produces higher speed. A small cle
 The steering command is smoothed to avoid sudden jumps, and a speed dependent gain $`f_v`$ reduces the steering authority when the car is fast.
 
 $$
-\alpha_{\text{des}} = \mathrm{clip}(\theta^{*}, -\alpha_{\max}, \alpha_{\max}), \qquad
+\alpha_{\text{des}} = \mathrm{clip}(\theta^{\ast}, -\alpha_{\max}, \alpha_{\max}), \qquad
 \alpha_{\text{smooth}} = \lambda\,\alpha_{\text{des}} + (1-\lambda)\,\alpha_{\text{prev}}
 $$
 
